@@ -35,7 +35,9 @@
 		<true/>
 	</dict>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
+	<string>Datalake requires location access to log where offline face authentication occurs.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Datalake requires camera access for off-grid face authentication and enrollment.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>
