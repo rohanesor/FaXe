@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
-import { Camera, useCameraDevice, useObjectOutput, ScannedCode } from 'react-native-vision-camera';
+import { Camera, useCameraDevice, useObjectOutput, isScannedCode } from 'react-native-vision-camera';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { deviceProvisioner, ProvisioningData } from '../modules/sync/DeviceProvisioner';
@@ -24,79 +24,108 @@ type Props = StackScreenProps<MainStackParamList, 'Provisioning'>;
  * Screen displayed on first launch if the device is not provisioned.
  * Collects cloud base URLs and authorization keys via forms or QR scans.
  */
+interface QRScannerProps {
+  onCodeScanned: (data: string) => void;
+  onCancel: () => void;
+}
+
+function QRScanner({ onCodeScanned, onCancel }: QRScannerProps) {
+  const device = useCameraDevice('back');
+  const [hasCameraPermission, setHasCameraPermission] = useState(false);
+
+  useEffect(() => {
+    const checkPermission = async () => {
+      const granted = await cameraManager.hasPermission();
+      if (granted) {
+        setHasCameraPermission(true);
+      } else {
+        const requestResult = await cameraManager.requestPermission();
+        setHasCameraPermission(requestResult);
+        if (!requestResult) {
+          Toast.show({
+            message: 'Camera permission is required to scan QR codes.',
+            type: 'error',
+          });
+          onCancel();
+        }
+      }
+    };
+    checkPermission();
+  }, [onCancel]);
+
+  const objectOutput = useObjectOutput({
+    types: ['qr'],
+    onObjectsScanned: (objects) => {
+      if (objects.length > 0) {
+        const obj = objects[0];
+        if (isScannedCode(obj) && obj.value) {
+          onCodeScanned(obj.value);
+        }
+      }
+    },
+  });
+
+  if (!hasCameraPermission) {
+    return (
+      <View style={[styles.scannerContainer, { justifyContent: 'center', alignItems: 'center' }]}>
+        <Text style={{ color: '#fff', marginBottom: 20 }}>Requesting camera permission...</Text>
+        <Button
+          label="Cancel Scan"
+          onPress={onCancel}
+          variant="outline"
+          style={styles.cancelScanBtn}
+        />
+      </View>
+    );
+  }
+
+  if (!device) {
+    return (
+      <View style={[styles.scannerContainer, { justifyContent: 'center', alignItems: 'center' }]}>
+        <Text style={{ color: '#fff', marginBottom: 20 }}>No camera device available</Text>
+        <Button
+          label="Cancel Scan"
+          onPress={onCancel}
+          variant="outline"
+          style={styles.cancelScanBtn}
+        />
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.scannerContainer}>
+      <Camera
+        style={StyleSheet.absoluteFill}
+        device={device}
+        isActive={true}
+        outputs={[objectOutput]}
+      />
+      <View style={styles.scannerHeader}>
+        <Text style={styles.scannerTitle}>Scan Provisioning QR Code</Text>
+        <Text style={styles.scannerSubtitle}>Position the QR code inside the frame</Text>
+      </View>
+      <View style={styles.scannerTargetFrame} />
+      <Button
+        label="Cancel Scan"
+        onPress={onCancel}
+        variant="outline"
+        style={styles.cancelScanBtn}
+      />
+    </View>
+  );
+}
+
+/**
+ * Screen displayed on first launch if the device is not provisioned.
+ * Collects cloud base URLs and authorization keys via forms or QR scans.
+ */
 export function ProvisioningScreen({ navigation }: Props) {
   const [awsBaseUrl, setAwsBaseUrl] = useState('');
   const [deviceId, setDeviceId] = useState('');
   const [deviceSecret, setDeviceSecret] = useState('');
   const [partition, setPartition] = useState('');
   const [isScanning, setIsScanning] = useState(false);
-  const [hasCameraPermission, setHasCameraPermission] = useState(false);
-
-  const device = useCameraDevice('back');
-
-  useEffect(() => {
-    if (isScanning) {
-      const checkPermission = async () => {
-        const granted = await cameraManager.hasPermission();
-        if (granted) {
-          setHasCameraPermission(true);
-        } else {
-          const requestResult = await cameraManager.requestPermission();
-          setHasCameraPermission(requestResult);
-          if (!requestResult) {
-            Toast.show({
-              message: 'Camera permission is required to scan QR codes.',
-              type: 'error',
-            });
-            setIsScanning(false);
-          }
-        }
-      };
-      checkPermission();
-    }
-  }, [isScanning]);
-
-  // Decode QR barcode scans
-  const codeScannerOutput = useObjectOutput({
-    types: ['qr'],
-    onObjectsScanned: (objects) => {
-      if (objects.length > 0) {
-        const code = objects[0] as unknown as ScannedCode;
-        if (code && code.value) {
-          try {
-            const dataString = code.value;
-            Logger.info('ProvisioningScreen', `QR Code scanned: ${dataString}`);
-            const parsed: ProvisioningData = JSON.parse(dataString);
-
-            if (parsed.awsBaseUrl && parsed.deviceId && parsed.deviceSecret && parsed.partition) {
-              setAwsBaseUrl(parsed.awsBaseUrl);
-              setDeviceId(parsed.deviceId);
-              setDeviceSecret(parsed.deviceSecret);
-              setPartition(parsed.partition);
-              
-              setIsScanning(false);
-              
-              Toast.show({
-                message: 'QR Code parsed successfully. Credentials loaded.',
-                type: 'success',
-              });
-            } else {
-              Toast.show({
-                message: 'QR Code JSON is missing required fields.',
-                type: 'error',
-              });
-            }
-          } catch (err) {
-            Logger.error('ProvisioningScreen', 'Failed to parse QR code JSON', err);
-            Toast.show({
-              message: 'Invalid QR Code format. Please scan a valid provisioning JSON.',
-              type: 'error',
-            });
-          }
-        }
-      }
-    },
-  });
 
   const handleSave = () => {
     if (!awsBaseUrl.trim() || !deviceId.trim() || !deviceSecret.trim() || !partition.trim()) {
@@ -140,27 +169,41 @@ export function ProvisioningScreen({ navigation }: Props) {
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.keyboardView}
       >
-        {isScanning && device && hasCameraPermission ? (
-          // QR Barcode Camera overlay scanner
-          <View style={styles.scannerContainer}>
-            <Camera
-              style={StyleSheet.absoluteFill}
-              device={device}
-              isActive={true}
-              outputs={[codeScannerOutput]}
-            />
-            <View style={styles.scannerHeader}>
-              <Text style={styles.scannerTitle}>Scan Provisioning QR Code</Text>
-              <Text style={styles.scannerSubtitle}>Position the QR code inside the frame</Text>
-            </View>
-            <View style={styles.scannerTargetFrame} />
-            <Button
-              label="Cancel Scan"
-              onPress={() => setIsScanning(false)}
-              variant="outline"
-              style={styles.cancelScanBtn}
-            />
-          </View>
+        {isScanning && Platform.OS !== 'android' ? (
+          <QRScanner
+            onCancel={() => setIsScanning(false)}
+            onCodeScanned={(dataString) => {
+              try {
+                Logger.info('ProvisioningScreen', `QR Code scanned: ${dataString}`);
+                const parsed: ProvisioningData = JSON.parse(dataString);
+
+                if (parsed.awsBaseUrl && parsed.deviceId && parsed.deviceSecret && parsed.partition) {
+                  setAwsBaseUrl(parsed.awsBaseUrl);
+                  setDeviceId(parsed.deviceId);
+                  setDeviceSecret(parsed.deviceSecret);
+                  setPartition(parsed.partition);
+                  
+                  setIsScanning(false);
+                  
+                  Toast.show({
+                    message: 'QR Code parsed successfully. Credentials loaded.',
+                    type: 'success',
+                  });
+                } else {
+                  Toast.show({
+                    message: 'QR Code JSON is missing required fields.',
+                    type: 'error',
+                  });
+                }
+              } catch (err) {
+                Logger.error('ProvisioningScreen', 'Failed to parse QR code JSON', err);
+                Toast.show({
+                  message: 'Invalid QR Code format. Please scan a valid provisioning JSON.',
+                  type: 'error',
+                });
+              }
+            }}
+          />
         ) : (
           // Manual Provisioning Form View
           <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -175,11 +218,21 @@ export function ProvisioningScreen({ navigation }: Props) {
               </Text>
               <Button
                 label="Scan Configuration QR"
-                onPress={() => setIsScanning(true)}
+                onPress={() => {
+                  if (Platform.OS === 'android') {
+                    Toast.show({
+                      message: 'QR Code scanning is only supported on iOS. Please enter credentials manually.',
+                      type: 'info',
+                    });
+                    return;
+                  }
+                  setIsScanning(true);
+                }}
                 variant="outline"
                 style={styles.scanBtn}
               />
             </View>
+
 
             <View style={styles.formCard}>
               <Text style={styles.formHeader}>Configuration Credentials</Text>

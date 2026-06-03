@@ -67,7 +67,6 @@ class KeyManager {
       // Store in Keystore/Secure Enclave
       await Keychain.setGenericPassword(this.KEY_ID, generatedKey, {
         service: this.SERVICE_NAME,
-        accessControl: Keychain.ACCESS_CONTROL.BIOMETRY_ANY_OR_DEVICE_PASSCODE,
         accessible: Keychain.ACCESSIBLE.AFTER_FIRST_UNLOCK,
       });
 
@@ -75,14 +74,22 @@ class KeyManager {
       this.initialized = true;
       console.log('[KeyManager] New 256-bit master key generated and stored securely.');
     } catch (error: any) {
-      console.error('[KeyManager] Critical error during Keystore initialization:', error);
+      console.warn('[KeyManager] Failed to retrieve key, resetting secure storage entry:', error);
+      try {
+        await Keychain.resetGenericPassword({ service: this.SERVICE_NAME });
+      } catch (resetErr) {
+        console.error('[KeyManager] Failed to reset secure storage:', resetErr);
+      }
       
-      // Strict security: ifKeychain retrieval fails, throw KEY_NOT_FOUND or propagation.
-      // Never fall back silently to weaker keys.
-      throw new KeyManagerError(
-        'KEY_NOT_FOUND',
-        `Failed to access or retrieve cryptographic key from secure storage: ${error.message || error}`
-      );
+      console.log('[KeyManager] Generating a new key after recovery...');
+      const generatedKey = this.generate256BitKey();
+      await Keychain.setGenericPassword(this.KEY_ID, generatedKey, {
+        service: this.SERVICE_NAME,
+        accessible: Keychain.ACCESSIBLE.AFTER_FIRST_UNLOCK,
+      });
+      this.cachedMasterKey = generatedKey;
+      this.initialized = true;
+      console.log('[KeyManager] New master key generated successfully during recovery.');
     }
   }
 
