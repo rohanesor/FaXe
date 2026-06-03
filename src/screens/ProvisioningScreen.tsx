@@ -67,8 +67,8 @@ function QRScanner({ onCodeScanned, onCancel }: QRScannerProps) {
 
   if (!hasCameraPermission) {
     return (
-      <View style={[styles.scannerContainer, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={{ color: '#fff', marginBottom: 20 }}>Requesting camera permission...</Text>
+      <View style={[styles.scannerContainer, styles.scannerPlaceholder]}>
+        <Text style={styles.placeholderText}>Requesting camera permission...</Text>
         <Button
           label="Cancel Scan"
           onPress={onCancel}
@@ -81,8 +81,8 @@ function QRScanner({ onCodeScanned, onCancel }: QRScannerProps) {
 
   if (!device) {
     return (
-      <View style={[styles.scannerContainer, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={{ color: '#fff', marginBottom: 20 }}>No camera device available</Text>
+      <View style={[styles.scannerContainer, styles.scannerPlaceholder]}>
+        <Text style={styles.placeholderText}>No camera device available</Text>
         <Button
           label="Cancel Scan"
           onPress={onCancel}
@@ -424,5 +424,13 @@ const styles = StyleSheet.create({
   cancelScanBtn: {
     marginBottom: 20,
     height: 50,
+  },
+  scannerPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  placeholderText: {
+    color: '#FFFFFF',
+    marginBottom: 20,
   },
 });
