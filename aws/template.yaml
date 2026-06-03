@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DatalakeFaceAuth - Complete Backend Infrastructure'
+
+Parameters:
+  AppName:
+    Type: String
+    Default: 'datalake-face-auth'
+  Environment:
+    Type: String
+    Default: 'prod'
+
+Resources:
+
+  # ─── DynamoDB Tables ───────────────────────────────────────
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-users'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: partition
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: partition-index
+          KeySchema:
+            - AttributeName: partition
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  AuthLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-auth-logs'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: partition
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: partition-timestamp-index
+          KeySchema:
+            - AttributeName: partition
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DevicesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-devices'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: deviceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: deviceId
+          KeyType: HASH
+
+  SyncQueueTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-sync-queue'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: partition
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: partition-index
+          KeySchema:
+            - AttributeName: partition
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ─── S3 Bucket ─────────────────────────────────────────────
+
+  EmbeddingsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AppName}-embeddings-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 90
+
+  # ─── IAM Role for Lambda ────────────────────────────────────
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AppName}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DatalakeAppPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:BatchGetItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+                  - !Sub '${UsersTable.Arn}/index/*'
+                  - !GetAtt AuthLogsTable.Arn
+                  - !Sub '${AuthLogsTable.Arn}/index/*'
+                  - !GetAtt DevicesTable.Arn
+                  - !GetAtt SyncQueueTable.Arn
+                  - !Sub '${SyncQueueTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt EmbeddingsBucket.Arn
+                  - !Sub '${EmbeddingsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # ─── Secrets Manager ───────────────────────────────────────
+
+  JWTSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${AppName}-jwt-secret'
+      Description: 'JWT signing secret for device authentication'
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: 'jwt_secret'
+        PasswordLength: 64
+        ExcludeCharacters: '"@/\'
+
+# ─── Outputs ───────────────────────────────────────────────
+
+Outputs:
+  UsersTableName:
+    Value: !Ref UsersTable
+    Export:
+      Name: !Sub '${AppName}-users-table'
+
+  AuthLogsTableName:
+    Value: !Ref AuthLogsTable
+    Export:
+      Name: !Sub '${AppName}-auth-logs-table'
+
+  DevicesTableName:
+    Value: !Ref DevicesTable
+    Export:
+      Name: !Sub '${AppName}-devices-table'
+
+  SyncQueueTableName:
+    Value: !Ref SyncQueueTable
+    Export:
+      Name: !Sub '${AppName}-sync-queue-table'
+
+  EmbeddingsBucketName:
+    Value: !Ref EmbeddingsBucket
+    Export:
+      Name: !Sub '${AppName}-embeddings-bucket'
+
+  LambdaRoleArn:
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AppName}-lambda-role-arn'
+
+  JWTSecretArn:
+    Value: !Ref JWTSecret
+    Export:
+      Name: !Sub '${AppName}-jwt-secret-arn'
