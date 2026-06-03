@@ -3,6 +3,7 @@ import { LivenessResult } from '../../types/liveness';
 import { VerificationOutcome, VerificationResult } from '../../types/verification';
 import { userRepository, authLogRepository, wipeStoredEmbeddings } from '../database';
 import { recognizeFace } from '../recognition';
+import { Logger } from '../../utils/logger';
 
 /**
  * Orchestrator managing the offline face verification pipeline.
@@ -34,7 +35,7 @@ class VerificationManager {
     try {
       // Step 1: Check Liveness validation
       if (!livenessResult.passed) {
-        console.log('[VerificationManager] Liveness check failed.');
+        Logger.warn('VerificationManager', 'Liveness check failed.');
         
         // Log spoof attempt in DB
         await authLogRepository.logAuthAttempt({
@@ -61,7 +62,7 @@ class VerificationManager {
       // Step 2: Fetch stored user embeddings for partition
       const candidates = await userRepository.getEmbeddingsForPartition(partition);
       if (candidates.length === 0) {
-        console.log(`[VerificationManager] No enrolled operators in partition: ${partition}`);
+        Logger.warn('VerificationManager', `No enrolled operators in partition: ${partition}`);
 
         // Log search attempt failure due to zero population
         await authLogRepository.logAuthAttempt({
@@ -90,7 +91,7 @@ class VerificationManager {
 
       // Step 4: If not recognized
       if (!matchResult.matched) {
-        console.log('[VerificationManager] Biometric match failed.');
+        Logger.warn('VerificationManager', 'Biometric match failed.');
 
         // Wipe decrypted vector arrays from memory immediately
         wipeStoredEmbeddings(candidates);
@@ -118,7 +119,7 @@ class VerificationManager {
       }
 
       // Step 5: If recognized successfully
-      console.log(`[VerificationManager] Match verified for user ID: ${matchResult.userId}`);
+      Logger.info('VerificationManager', `Match verified for user ID: ${matchResult.userId}`);
       
       const allUsers = await userRepository.getUsersByPartition(partition);
       const matchedUser = allUsers.find((u) => u.id === matchResult.userId);
@@ -143,7 +144,7 @@ class VerificationManager {
       });
 
       const duration = Date.now() - startTime;
-      console.log(`[VerificationManager] Total verification process time: ${duration}ms`);
+      Logger.info('VerificationManager', `Total verification process time: ${duration}ms`);
 
       return {
         outcome: VerificationOutcome.VERIFIED,
@@ -156,7 +157,7 @@ class VerificationManager {
         message: null,
       };
     } catch (error: any) {
-      console.error('[VerificationManager] Unexpected verification exception:', error);
+      Logger.error('VerificationManager', 'Unexpected verification exception', error);
       const duration = Date.now() - startTime;
       
       return {

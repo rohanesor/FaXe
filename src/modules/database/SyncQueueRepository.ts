@@ -130,6 +130,50 @@ class SyncQueueRepository {
       return 0;
     }
   }
+
+  /**
+   * Fetches sync queue items that have failed 5 or more times (dead letter queue).
+   */
+  public async getDeadLetterQueue(): Promise<SyncQueueItem[]> {
+    const db = databaseManager.getDB();
+    try {
+      const result = db.execute(
+        'SELECT id, action, payload, created_at, attempts, last_attempt FROM sync_queue WHERE attempts >= 5 ORDER BY created_at ASC;'
+      );
+
+      const items: SyncQueueItem[] = [];
+      const len = result.rows?.length ?? 0;
+      for (let i = 0; i < len; i++) {
+        const row = result.rows?.item(i);
+        items.push({
+          id: row.id,
+          action: row.action,
+          payload: row.payload,
+          createdAt: new Date(row.created_at).toISOString(),
+          attempts: row.attempts,
+          lastAttempt: row.last_attempt ? new Date(row.last_attempt).toISOString() : undefined,
+        });
+      }
+      return items;
+    } catch (error) {
+      console.error('[SyncQueueRepository] Failed to fetch dead letter items:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Resets the attempts counter to 0 for all items in the queue (re-enabling retry processing).
+   */
+  public async resetAllAttempts(): Promise<void> {
+    const db = databaseManager.getDB();
+    try {
+      db.execute('UPDATE sync_queue SET attempts = 0;');
+      console.log('[SyncQueueRepository] Attempts reset to 0 for all queued items.');
+    } catch (error) {
+      console.error('[SyncQueueRepository] Failed to reset attempts:', error);
+      throw error;
+    }
+  }
 }
 
 export const syncQueueRepository = SyncQueueRepository.getInstance();

@@ -13,7 +13,7 @@ export interface AuthLog {
   id: string;
   userId: string;
   timestamp: string;     // ISO timestamp
-  result: 'success' | 'failure' | 'spoof';
+  result: 'success' | 'failure' | 'spoof' | 'app_error';
   confidence: number;    // Recognition confidence score
   livenessScore: number; // Liveness detection challenge score
   location?: {

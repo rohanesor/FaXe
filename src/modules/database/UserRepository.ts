@@ -200,10 +200,99 @@ class UserRepository {
   }
 
   /**
-   * Deletes a user locally from the SQLite database.
-   * Enqueues a 'delete_user' action for server synchronization.
+   * Upserts a user record directly (used when pulling updates from cloud).
+   * Does not enqueue synchronization items to avoid loops.
    */
-  public async deleteUser(userId: string): Promise<void> {
+  public async upsertUser(user: {
+    id: string;
+    name_encrypted: string;
+    role_encrypted: string;
+    partition: string;
+    embedding_blob?: Uint8Array;
+    enrolled_at: number;
+    last_seen: number;
+    sync_status: 'synced' | 'pending';
+  }): Promise<void> {
+    const db = databaseManager.getDB();
+    try {
+      await db.transaction(async (tx) => {
+        const check = tx.execute('SELECT id FROM users WHERE id = ?;', [user.id]);
+        const exists = (check.rows?.length ?? 0) > 0;
+
+        if (exists) {
+          if (user.embedding_blob) {
+            tx.execute(
+              `UPDATE users SET 
+                name_encrypted = ?, 
+                role_encrypted = ?, 
+                partition = ?, 
+                embedding_blob = ?, 
+                enrolled_at = ?, 
+                last_seen = ?, 
+                sync_status = ? 
+              WHERE id = ?;`,
+              [
+                user.name_encrypted,
+                user.role_encrypted,
+                user.partition,
+                user.embedding_blob,
+                user.enrolled_at,
+                user.last_seen,
+                user.sync_status,
+                user.id,
+              ]
+            );
+          } else {
+            tx.execute(
+              `UPDATE users SET 
+                name_encrypted = ?, 
+                role_encrypted = ?, 
+                partition = ?, 
+                enrolled_at = ?, 
+                last_seen = ?, 
+                sync_status = ? 
+              WHERE id = ?;`,
+              [
+                user.name_encrypted,
+                user.role_encrypted,
+                user.partition,
+                user.enrolled_at,
+                user.last_seen,
+                user.sync_status,
+                user.id,
+              ]
+            );
+          }
+        } else {
+          tx.execute(
+            `INSERT INTO users (
+              id, name_encrypted, role_encrypted, partition, embedding_blob, enrolled_at, last_seen, sync_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);`,
+            [
+              user.id,
+              user.name_encrypted,
+              user.role_encrypted,
+              user.partition,
+              user.embedding_blob || null,
+              user.enrolled_at,
+              user.last_seen,
+              user.sync_status,
+            ]
+          );
+        }
+      });
+      console.log(`[UserRepository] Upserted user ID: ${user.id} (${user.sync_status})`);
+    } catch (error) {
+      console.error('[UserRepository] Failed to upsert user:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Deletes a user locally from the SQLite database.
+   * Enqueues a 'delete_user' action for server synchronization if enqueueSync is true.
+   */
+  public async deleteUser(userId: string, enqueueSync: boolean = true): Promise<void> {
     const db = databaseManager.getDB();
 
     try {
@@ -211,15 +300,31 @@ class UserRepository {
         tx.execute('DELETE FROM users WHERE id = ?;', [userId]);
       });
 
-      // Enqueue sync event
-      await syncQueueRepository.enqueue('delete_user', {
-        userId,
-      });
+      if (enqueueSync) {
+        // Enqueue sync event
+        await syncQueueRepository.enqueue('delete_user', {
+          userId,
+        });
+      }
 
       console.log(`[UserRepository] Hard deleted user ${userId} locally.`);
     } catch (error) {
       console.error('[UserRepository] Failed to delete user locally:', error);
       throw error;
+    }
+  }
+
+  /**
+   * Retrieves the total count of users in the database.
+   */
+  public async getUsersCount(): Promise<number> {
+    const db = databaseManager.getDB();
+    try {
+      const result = db.execute('SELECT COUNT(*) as count FROM users;');
+      return result.rows?.item(0)?.count ?? 0;
+    } catch (error) {
+      console.error('[UserRepository] Failed to count users:', error);
+      return 0;
     }
   }
 }

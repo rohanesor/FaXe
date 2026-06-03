@@ -26,7 +26,7 @@ import { VerificationOutcome } from './verification';
 
 export interface AuthLogInput {
   userId: string;
-  result: 'success' | 'failure' | 'spoof';
+  result: 'success' | 'failure' | 'spoof' | 'app_error';
   confidence: number;      // Cosine similarity score
   livenessScore: number;   // Liveness sequence score
   latitude?: number | null;

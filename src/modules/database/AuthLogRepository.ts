@@ -124,7 +124,7 @@ class AuthLogRepository {
     }
 
     // Map outcome to SQLite result string
-    let dbResult: 'success' | 'failure' | 'spoof' = log.result;
+    let dbResult: 'success' | 'failure' | 'spoof' | 'app_error' = log.result;
     if (log.outcome) {
       if (log.outcome === VerificationOutcome.VERIFIED) {
         dbResult = 'success';
@@ -315,6 +315,20 @@ class AuthLogRepository {
     } catch (error) {
       console.error('[AuthLogRepository] Failed to fetch today stats:', error);
       return { success: 0, failure: 0 };
+    }
+  }
+
+  /**
+   * Retrieves the total count of logs in the database.
+   */
+  public async getLogsCount(): Promise<number> {
+    const db = databaseManager.getDB();
+    try {
+      const result = db.execute('SELECT COUNT(*) as count FROM auth_logs;');
+      return result.rows?.item(0)?.count ?? 0;
+    } catch (error) {
+      console.error('[AuthLogRepository] Failed to count logs:', error);
+      return 0;
     }
   }
 }

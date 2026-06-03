@@ -7,12 +7,14 @@ import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { storage } from '../store';
 import { userRepository, syncQueueRepository, authLogRepository } from '../modules/database';
+import { SkeletonLoader } from '../components/SkeletonLoader';
 import { AuthLog } from '../types';
 
 type Props = StackScreenProps<MainStackParamList, 'Home'>;
 
 export function HomeScreen({ navigation }: Props) {
   const isFocused = useIsFocused();
+  const [isLoading, setIsLoading] = useState(true);
   const [enrolledCount, setEnrolledCount] = useState(0);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [partition, setPartition] = useState('AFR-E-02');
@@ -22,6 +24,7 @@ export function HomeScreen({ navigation }: Props) {
   useEffect(() => {
     if (isFocused) {
       const loadStats = async () => {
+        setIsLoading(true);
         try {
           const cachedPartition = storage.getString('partition') || 'AFR-E-02';
           setPartition(cachedPartition);
@@ -43,6 +46,8 @@ export function HomeScreen({ navigation }: Props) {
           setTodayStats(stats);
         } catch (err) {
           console.error('[HomeScreen] Failed to load offline stats:', err);
+        } finally {
+          setIsLoading(false);
         }
       };
       loadStats();
@@ -97,12 +102,18 @@ export function HomeScreen({ navigation }: Props) {
           </View>
         </View>
 
-        <View style={styles.heroCard}>
-          <Text style={styles.heroTitle}>Offline Status: Operational</Text>
-          <Text style={styles.heroText}>
-            Local face embeddings cache is up to date. Direct biometrics enrolment and recognition can be executed securely off-grid.
-          </Text>
-        </View>
+        {isLoading ? (
+          <View style={styles.heroCardSkeleton}>
+            <SkeletonLoader width="100%" height={90} borderRadius={16} />
+          </View>
+        ) : (
+          <View style={styles.heroCard}>
+            <Text style={styles.heroTitle}>Offline Status: Operational</Text>
+            <Text style={styles.heroText}>
+              Local face embeddings cache is up to date. Direct biometrics enrolment and recognition can be executed securely off-grid.
+            </Text>
+          </View>
+        )}
 
         <View style={styles.actionsContainer}>
           <Text style={styles.sectionTitle}>Verification Actions</Text>
@@ -112,9 +123,16 @@ export function HomeScreen({ navigation }: Props) {
             onPress={() => navigation.navigate('Enroll')}
             style={styles.actionBtn}
           />
-          <Text style={styles.enrolledUserText}>
-            {enrolledCount} enrolled user{enrolledCount !== 1 ? 's' : ''} in local partition
-          </Text>
+          
+          {isLoading ? (
+            <View style={styles.skeletonTextContainer}>
+              <SkeletonLoader width={180} height={14} borderRadius={4} />
+            </View>
+          ) : (
+            <Text style={styles.enrolledUserText}>
+              {enrolledCount} enrolled user{enrolledCount !== 1 ? 's' : ''} in local partition
+            </Text>
+          )}
 
           <Button
             label="Verify Identity"
@@ -124,27 +142,39 @@ export function HomeScreen({ navigation }: Props) {
           />
 
           {/* Last verification row */}
-          {lastAttempt && (
-            <View style={styles.lastAttemptContainer}>
-              <Text style={styles.lastAttemptLabel}>Last Verification Result</Text>
-              <View style={styles.lastAttemptRow}>
-                <Text style={[styles.lastAttemptResult, getResultColor(lastAttempt.result)]}>
-                  {lastAttempt.result === 'success' ? 'VERIFIED' :
-                   lastAttempt.result === 'spoof' ? 'SPOOF_DETECTED' : 'NOT_RECOGNIZED'}
-                </Text>
-                <Text style={styles.lastAttemptTime}>
-                  at {formatLastAttemptTime(lastAttempt.timestamp)}
-                </Text>
-              </View>
+          {isLoading ? (
+            <View style={styles.skeletonContainerRow}>
+              <SkeletonLoader width="100%" height={56} borderRadius={12} />
             </View>
+          ) : (
+            lastAttempt && (
+              <View style={styles.lastAttemptContainer}>
+                <Text style={styles.lastAttemptLabel}>Last Verification Result</Text>
+                <View style={styles.lastAttemptRow}>
+                  <Text style={[styles.lastAttemptResult, getResultColor(lastAttempt.result)]}>
+                    {lastAttempt.result === 'success' ? 'VERIFIED' :
+                     lastAttempt.result === 'spoof' ? 'SPOOF_DETECTED' : 'NOT_RECOGNIZED'}
+                  </Text>
+                  <Text style={styles.lastAttemptTime}>
+                    at {formatLastAttemptTime(lastAttempt.timestamp)}
+                  </Text>
+                </View>
+              </View>
+            )
           )}
 
           {/* Today's statistics row */}
-          <View style={styles.todayStatsContainer}>
-            <Text style={styles.todayStatsText}>
-              Today's Scans: <Text style={styles.resultSuccess}>{todayStats.success} passed</Text> • <Text style={styles.resultFailure}>{todayStats.failure} failed</Text>
-            </Text>
-          </View>
+          {isLoading ? (
+            <View style={styles.skeletonStatsRow}>
+              <SkeletonLoader width={220} height={16} borderRadius={4} />
+            </View>
+          ) : (
+            <View style={styles.todayStatsContainer}>
+              <Text style={styles.todayStatsText}>
+                Today's Scans: <Text style={styles.resultSuccess}>{todayStats.success} passed</Text> • <Text style={styles.resultFailure}>{todayStats.failure} failed</Text>
+              </Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.footer}>
@@ -249,6 +279,9 @@ const styles = StyleSheet.create({
     padding: 20,
     marginVertical: 20,
   },
+  heroCardSkeleton: {
+    marginVertical: 20,
+  },
   heroTitle: {
     fontFamily: 'System',
     fontSize: 16,
@@ -289,6 +322,18 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginBottom: 12,
     letterSpacing: 0.5,
+  },
+  skeletonTextContainer: {
+    alignItems: 'center',
+    marginTop: 6,
+    marginBottom: 16,
+  },
+  skeletonContainerRow: {
+    marginTop: 14,
+  },
+  skeletonStatsRow: {
+    marginTop: 16,
+    alignItems: 'center',
   },
   lastAttemptContainer: {
     backgroundColor: '#111111',

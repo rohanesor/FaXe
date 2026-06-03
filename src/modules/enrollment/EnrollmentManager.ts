@@ -4,6 +4,7 @@ import { generateUUID } from '../../utils/uuid';
 import { generateEmbedding } from '../recognition/EmbeddingGenerator';
 import { recognizeFace } from '../recognition';
 import { userRepository, wipeStoredEmbeddings } from '../database/UserRepository';
+import { Logger } from '../../utils/logger';
 
 /**
  * Orchestrator class managing offline biometric user enrollment sequences.
@@ -30,7 +31,7 @@ class EnrollmentManager {
     faceFrame: AlignedFaceFrame
   ): Promise<EnrollmentResult> {
     const startTime = Date.now();
-    console.log('[EnrollmentManager] Initializing enrollment pipeline...');
+    Logger.info('EnrollmentManager', 'Initializing enrollment pipeline...');
 
     try {
       // Step 1: Input Validation
@@ -49,13 +50,13 @@ class EnrollmentManager {
 
       // Step 2: Check for Duplicate Face
       // Scan current partition embeddings. If probe face has similarity > 0.90, reject.
-      console.log(`[EnrollmentManager] Fetching existing partition users for '${input.partition}' to scan duplicates...`);
+      Logger.info('EnrollmentManager', `Fetching existing partition users for '${input.partition}' to scan duplicates...`);
       const existingEmbeddings = await userRepository.getEmbeddingsForPartition(input.partition);
       
       try {
         if (existingEmbeddings.length > 0) {
           const matchResult = await recognizeFace(faceFrame, existingEmbeddings);
-          console.log('[EnrollmentManager] Duplicate scan outcome:', matchResult);
+          Logger.info('EnrollmentManager', `Duplicate scan outcome: ${JSON.stringify(matchResult)}`);
           
           if (matchResult.confidence > 0.90) {
             return this.failResult(
@@ -71,7 +72,7 @@ class EnrollmentManager {
       }
 
       // Step 3: Generate Embedding
-      console.log('[EnrollmentManager] Running TFLite MobileFaceNet embedding generator...');
+      Logger.info('EnrollmentManager', 'Running TFLite MobileFaceNet embedding generator...');
       const generatorResult = await generateEmbedding(faceFrame.base64jpeg);
       const embeddingVector = generatorResult.embedding;
 
@@ -86,7 +87,7 @@ class EnrollmentManager {
       const enrolledAt = Date.now();
       const isoTimestamp = new Date(enrolledAt).toISOString();
 
-      console.log(`[EnrollmentManager] Saving encrypted profile to SQLite (ID: ${userId})...`);
+      Logger.info('EnrollmentManager', `Saving encrypted profile to SQLite (ID: ${userId})...`);
       await userRepository.enrollUser({
         userId,
         name: input.name.trim(),
@@ -97,7 +98,7 @@ class EnrollmentManager {
       });
 
       const elapsed = Date.now() - startTime;
-      console.log(`[EnrollmentManager] Enrollment sequence completed successfully in ${elapsed}ms.`);
+      Logger.info('EnrollmentManager', `Enrollment sequence completed successfully in ${elapsed}ms.`);
 
       // Step 6: Return success
       return {
@@ -110,7 +111,7 @@ class EnrollmentManager {
       };
     } catch (error: any) {
       const elapsed = Date.now() - startTime;
-      console.error(`[EnrollmentManager] Pipeline exception after ${elapsed}ms:`, error);
+      Logger.error('EnrollmentManager', `Pipeline exception after ${elapsed}ms`, error);
       
       return {
         success: false,
@@ -131,7 +132,7 @@ class EnrollmentManager {
     message: string,
     step: number
   ): EnrollmentResult {
-    console.warn(`[EnrollmentManager] Step ${step} failed: [${reason}] ${message}`);
+    Logger.warn('EnrollmentManager', `Step ${step} failed: [${reason}] ${message}`);
     return {
       success: false,
       userId: null,

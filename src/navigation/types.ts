@@ -7,8 +7,11 @@ export type AuthStackParamList = {
 
 export type MainStackParamList = {
   Home: undefined;
-  Enroll: undefined;
+  Enroll: { prefill?: { name: string; role: 'worker' | 'admin' | 'visitor'; partition: string } } | undefined;
   Verify: undefined;
   Result: { result: VerificationResult };
   Settings: undefined;
+  Provisioning: undefined;
+  MetricsDashboard: undefined;
+  DemoMode: undefined;
 };
