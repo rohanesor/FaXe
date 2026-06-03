@@ -1,13 +1,43 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
+import { useIsFocused } from '@react-navigation/native';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
+import { storage } from '../store';
+import { userRepository, syncQueueRepository } from '../modules/database';
 
 type Props = StackScreenProps<MainStackParamList, 'Home'>;
 
 export function HomeScreen({ navigation }: Props) {
+  const isFocused = useIsFocused();
+  const [enrolledCount, setEnrolledCount] = useState(0);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [partition, setPartition] = useState('AFR-E-02');
+
+  useEffect(() => {
+    if (isFocused) {
+      const loadStats = async () => {
+        try {
+          const cachedPartition = storage.getString('partition') || 'AFR-E-02';
+          setPartition(cachedPartition);
+
+          // Retrieve dynamic enrolled count for this partition
+          const users = await userRepository.getUsersByPartition(cachedPartition);
+          setEnrolledCount(users.length);
+
+          // Retrieve dynamic pending items count in the sync queue
+          const pendingCount = await syncQueueRepository.getPendingCount();
+          setPendingSyncCount(pendingCount);
+        } catch (err) {
+          console.error('[HomeScreen] Failed to load offline stats:', err);
+        }
+      };
+      loadStats();
+    }
+  }, [isFocused]);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
@@ -16,12 +46,29 @@ export function HomeScreen({ navigation }: Props) {
             <Text style={styles.title}>Field Operations</Text>
             <Text style={styles.subtitle}>OFFLINE IDENTITY VERIFICATION</Text>
           </View>
-          <Pressable
-            style={styles.settingsCog}
-            onPress={() => navigation.navigate('Settings')}
-          >
-            <Text style={styles.cogText}>Settings</Text>
-          </Pressable>
+          
+          <View style={styles.headerRight}>
+            <Pressable
+              style={styles.syncBtnContainer}
+              onPress={() => navigation.navigate('Settings')}
+            >
+              <Text style={styles.syncIcon}>🔄</Text>
+              {pendingSyncCount > 0 && (
+                <View style={styles.badge}>
+                  <Text style={styles.badgeText}>
+                    {pendingSyncCount > 99 ? '99+' : pendingSyncCount}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+
+            <Pressable
+              style={styles.settingsCog}
+              onPress={() => navigation.navigate('Settings')}
+            >
+              <Text style={styles.cogText}>⚙</Text>
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.heroCard}>
@@ -39,6 +86,9 @@ export function HomeScreen({ navigation }: Props) {
             onPress={() => navigation.navigate('Enroll')}
             style={styles.actionBtn}
           />
+          <Text style={styles.enrolledUserText}>
+            {enrolledCount} enrolled user{enrolledCount !== 1 ? 's' : ''} in local partition
+          </Text>
 
           <Button
             label="Verify Identity"
@@ -49,7 +99,7 @@ export function HomeScreen({ navigation }: Props) {
         </View>
 
         <View style={styles.footer}>
-          <Text style={styles.footerText}>Secure offline database: AFR-E-02</Text>
+          <Text style={styles.footerText}>Secure offline database: {partition}</Text>
         </View>
       </View>
     </SafeAreaView>
@@ -73,6 +123,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 20,
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   title: {
     fontFamily: 'System',
     fontSize: 28,
@@ -87,19 +141,56 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 2,
   },
-  settingsCog: {
+  syncBtnContainer: {
+    width: 40,
+    height: 40,
     backgroundColor: '#161616',
     borderWidth: 1,
     borderColor: '#222222',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
     borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+    position: 'relative',
+  },
+  syncIcon: {
+    fontSize: 16,
+    color: '#00E5FF',
+  },
+  badge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: '#FF3B3B',
+    borderRadius: 9,
+    minWidth: 18,
+    height: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    borderWidth: 1.5,
+    borderColor: '#0A0A0A',
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 9,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  settingsCog: {
+    width: 40,
+    height: 40,
+    backgroundColor: '#161616',
+    borderWidth: 1,
+    borderColor: '#222222',
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   cogText: {
     color: '#00E5FF',
-    fontSize: 12,
+    fontSize: 18,
     fontWeight: '700',
-    textTransform: 'uppercase',
   },
   heroCard: {
     backgroundColor: 'rgba(0, 229, 255, 0.05)',
@@ -137,8 +228,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   actionBtn: {
-    marginVertical: 10,
+    marginVertical: 6,
     height: 56,
+  },
+  enrolledUserText: {
+    fontFamily: 'System',
+    fontSize: 12,
+    color: '#00E5FF',
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 2,
+    marginBottom: 12,
+    letterSpacing: 0.5,
   },
   footer: {
     alignItems: 'center',
