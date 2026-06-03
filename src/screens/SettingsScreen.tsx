@@ -6,12 +6,20 @@ import { useMMKVBoolean } from 'react-native-mmkv';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { storage } from '../store';
+import { runRecognitionBenchmark } from '../modules/recognition';
 
 type Props = StackScreenProps<MainStackParamList, 'Settings'>;
 
 export function SettingsScreen({ navigation }: Props) {
   const [, setIsAdminMode] = useMMKVBoolean('isAdminMode', storage);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [isBenchmarking, setIsBenchmarking] = useState(false);
+  const [benchmarkResults, setBenchmarkResults] = useState<{
+    totalCandidates: number;
+    positiveMatchTimeMs: number;
+    negativeMatchTimeMs: number;
+    throughputScore: number;
+  } | null>(null);
 
   const handleManualSync = () => {
     setIsSyncing(true);
@@ -23,6 +31,26 @@ export function SettingsScreen({ navigation }: Props) {
 
   const handleEnterAdminMode = () => {
     setIsAdminMode(true);
+  };
+
+  const handleRunBenchmark = () => {
+    setIsBenchmarking(true);
+    // Shift execution slightly off-thread to prevent rendering frame freezes
+    setTimeout(() => {
+      try {
+        const results = runRecognitionBenchmark();
+        setBenchmarkResults(results);
+        Alert.alert(
+          'Benchmark Success',
+          `Linear search across 5,000 users complete!\n\nMatch scan: ${results.positiveMatchTimeMs}ms\nMismatch scan: ${results.negativeMatchTimeMs}ms\nThroughput: ${results.throughputScore} scans/sec`
+        );
+      } catch (err: any) {
+        console.error('[SettingsScreen] Benchmark run failed:', err);
+        Alert.alert('Benchmark Failed', err.message || 'An unexpected error occurred.');
+      } finally {
+        setIsBenchmarking(false);
+      }
+    }, 100);
   };
 
   return (
@@ -55,6 +83,42 @@ export function SettingsScreen({ navigation }: Props) {
             <Text style={styles.paramLabel}>Cache Database Version</Text>
             <Text style={styles.paramValue}>v1.12.0-sqlite</Text>
           </View>
+        </View>
+
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionHeader}>Biometric Performance</Text>
+          <Text style={styles.description}>
+            Verify offline match latency and vector search throughput speed against a simulated 5,000-user database in memory.
+          </Text>
+
+          {benchmarkResults && (
+            <View style={styles.benchmarkResults}>
+              <View style={styles.benchmarkRow}>
+                <Text style={styles.benchmarkLabel}>Simulated Users</Text>
+                <Text style={styles.benchmarkValue}>{benchmarkResults.totalCandidates}</Text>
+              </View>
+              <View style={styles.benchmarkRow}>
+                <Text style={styles.benchmarkLabel}>Match Latency</Text>
+                <Text style={styles.benchmarkValue}>{benchmarkResults.positiveMatchTimeMs} ms</Text>
+              </View>
+              <View style={styles.benchmarkRow}>
+                <Text style={styles.benchmarkLabel}>Mismatch Latency</Text>
+                <Text style={styles.benchmarkValue}>{benchmarkResults.negativeMatchTimeMs} ms</Text>
+              </View>
+              <View style={styles.benchmarkRow}>
+                <Text style={styles.benchmarkLabel}>Throughput Speed</Text>
+                <Text style={styles.benchmarkValueText}>{benchmarkResults.throughputScore} searches/s</Text>
+              </View>
+            </View>
+          )}
+
+          <Button
+            label={isBenchmarking ? 'Running Benchmark...' : 'Run Performance Benchmark'}
+            onPress={handleRunBenchmark}
+            disabled={isBenchmarking}
+            variant="outline"
+            style={styles.syncBtn}
+          />
         </View>
 
         <View style={styles.sectionCard}>
@@ -164,11 +228,44 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginBottom: 16,
   },
+  benchmarkResults: {
+    backgroundColor: '#0A0A0A',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#222222',
+  },
+  benchmarkRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#161616',
+  },
+  benchmarkLabel: {
+    fontFamily: 'System',
+    fontSize: 13,
+    color: '#888888',
+  },
+  benchmarkValue: {
+    fontFamily: 'System',
+    fontSize: 13,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  benchmarkValueText: {
+    fontFamily: 'System',
+    fontSize: 13,
+    color: '#00E5FF',
+    fontWeight: '700',
+  },
   syncBtn: {
     height: 46,
   },
   backBtn: {
-    marginTop: 'auto',
+    marginTop: 20,
     borderWidth: 1,
     borderColor: '#333333',
   },
