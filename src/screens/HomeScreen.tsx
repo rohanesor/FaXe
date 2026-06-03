@@ -6,7 +6,8 @@ import { useIsFocused } from '@react-navigation/native';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { storage } from '../store';
-import { userRepository, syncQueueRepository } from '../modules/database';
+import { userRepository, syncQueueRepository, authLogRepository } from '../modules/database';
+import { AuthLog } from '../types';
 
 type Props = StackScreenProps<MainStackParamList, 'Home'>;
 
@@ -15,6 +16,8 @@ export function HomeScreen({ navigation }: Props) {
   const [enrolledCount, setEnrolledCount] = useState(0);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [partition, setPartition] = useState('AFR-E-02');
+  const [lastAttempt, setLastAttempt] = useState<AuthLog | null>(null);
+  const [todayStats, setTodayStats] = useState<{ success: number; failure: number }>({ success: 0, failure: 0 });
 
   useEffect(() => {
     if (isFocused) {
@@ -30,6 +33,14 @@ export function HomeScreen({ navigation }: Props) {
           // Retrieve dynamic pending items count in the sync queue
           const pendingCount = await syncQueueRepository.getPendingCount();
           setPendingSyncCount(pendingCount);
+
+          // Retrieve last verification attempt
+          const lastVerification = await authLogRepository.getLastAttempt();
+          setLastAttempt(lastVerification);
+
+          // Retrieve today's verification counts
+          const stats = await authLogRepository.getTodayStats();
+          setTodayStats(stats);
         } catch (err) {
           console.error('[HomeScreen] Failed to load offline stats:', err);
         }
@@ -37,6 +48,21 @@ export function HomeScreen({ navigation }: Props) {
       loadStats();
     }
   }, [isFocused]);
+
+  const formatLastAttemptTime = (isoString: string) => {
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+      return '';
+    }
+  };
+
+  const getResultColor = (result: string) => {
+    if (result === 'success') return styles.resultSuccess;
+    if (result === 'spoof') return styles.resultSpoof;
+    return styles.resultFailure;
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -96,6 +122,29 @@ export function HomeScreen({ navigation }: Props) {
             variant="outline"
             style={styles.actionBtn}
           />
+
+          {/* Last verification row */}
+          {lastAttempt && (
+            <View style={styles.lastAttemptContainer}>
+              <Text style={styles.lastAttemptLabel}>Last Verification Result</Text>
+              <View style={styles.lastAttemptRow}>
+                <Text style={[styles.lastAttemptResult, getResultColor(lastAttempt.result)]}>
+                  {lastAttempt.result === 'success' ? 'VERIFIED' :
+                   lastAttempt.result === 'spoof' ? 'SPOOF_DETECTED' : 'NOT_RECOGNIZED'}
+                </Text>
+                <Text style={styles.lastAttemptTime}>
+                  at {formatLastAttemptTime(lastAttempt.timestamp)}
+                </Text>
+              </View>
+            </View>
+          )}
+
+          {/* Today's statistics row */}
+          <View style={styles.todayStatsContainer}>
+            <Text style={styles.todayStatsText}>
+              Today's Scans: <Text style={styles.resultSuccess}>{todayStats.success} passed</Text> • <Text style={styles.resultFailure}>{todayStats.failure} failed</Text>
+            </Text>
+          </View>
         </View>
 
         <View style={styles.footer}>
@@ -240,6 +289,62 @@ const styles = StyleSheet.create({
     marginTop: 2,
     marginBottom: 12,
     letterSpacing: 0.5,
+  },
+  lastAttemptContainer: {
+    backgroundColor: '#111111',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#222222',
+    padding: 12,
+    marginTop: 14,
+    alignItems: 'center',
+  },
+  lastAttemptLabel: {
+    fontFamily: 'System',
+    color: '#666666',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  lastAttemptRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  lastAttemptResult: {
+    fontFamily: 'System',
+    fontSize: 13,
+    fontWeight: '700',
+    marginRight: 6,
+  },
+  lastAttemptTime: {
+    fontFamily: 'System',
+    color: '#A0A0A0',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  todayStatsContainer: {
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  todayStatsText: {
+    fontFamily: 'System',
+    color: '#666666',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  resultSuccess: {
+    color: '#00C853',
+    fontWeight: '700',
+  },
+  resultFailure: {
+    color: '#FF3B3B',
+    fontWeight: '700',
+  },
+  resultSpoof: {
+    color: '#FF9100',
+    fontWeight: '700',
   },
   footer: {
     alignItems: 'center',

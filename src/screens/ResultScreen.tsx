@@ -4,123 +4,116 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
-import { UserCard } from '../components/UserCard';
-import { User } from '../types';
+import { OutcomeBadge } from '../components/OutcomeBadge';
+import { ConfidenceBar } from '../components/ConfidenceBar';
+import { storage } from '../store';
 
 type Props = StackScreenProps<MainStackParamList, 'Result'>;
 
+/**
+ * Renders a shareable summary audit card for a biometric verification event.
+ * Ideal for administrators reviewing offline authorization logs.
+ */
 export function ResultScreen({ route, navigation }: Props) {
   const { result } = route.params;
+  const partition = storage.getString('partition') || 'AFR-E-02';
+  const deviceId = 'DL-FACE-RN-99';
 
-  const isSpoof = !result.matched && result.livenessScore < 0.5;
-  const isMatch = result.matched;
-
-  const mockUser: User = {
-    id: result.userId || 'usr-4129',
-    name: 'Sarah Connor',
-    role: 'Security Officer',
-    partition: 'AFR-E-02',
-    embeddingBlob: 'mock_blob_123',
-    enrolledAt: '2026-01-15T08:30:00Z',
-    lastSeen: result.timestamp || new Date().toISOString(),
-    syncStatus: 'synced',
+  // Format date helper: "Jun 3, 2026 — 14:32:05"
+  const formatTimestamp = (isoString?: string | null): string => {
+    const date = isoString ? new Date(isoString) : new Date();
+    
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const month = months[date.getMonth()];
+    const day = date.getDate();
+    const year = date.getFullYear();
+    
+    const pad = (num: number) => num.toString().padStart(2, '0');
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    
+    return `${month} ${day}, ${year} — ${hours}:${minutes}:${seconds}`;
   };
 
-  const getStatusTheme = () => {
-    if (isMatch) {
-      return {
-        color: '#00C853',
-        title: 'VERIFIED MATCH',
-        description: 'Biometric identity has been successfully validated against the local cache.',
-        iconBg: 'rgba(0, 200, 83, 0.1)',
-      };
-    } else if (isSpoof) {
-      return {
-        color: '#FF3B3B',
-        title: 'SPOOF DETECTED',
-        description: 'Liveness challenge failed. A bypass attempt (photo/video replay) has been intercepted.',
-        iconBg: 'rgba(255, 59, 59, 0.1)',
-      };
-    } else {
-      return {
-        color: '#FF3B3B',
-        title: 'IDENTITY MISMATCH',
-        description: 'The face scan completed successfully, but does not match any profile in the database.',
-        iconBg: 'rgba(255, 59, 59, 0.1)',
-      };
-    }
-  };
-
-  const theme = getStatusTheme();
+  const timestampString = formatTimestamp(result.timestamp);
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.scrollContainer}>
         <View style={styles.header}>
-          <Text style={styles.title}>Verification Result</Text>
-          <Text style={styles.subtitle}>REAL-TIME VECTOR DECISION</Text>
+          <Text style={styles.title}>Audit Log Details</Text>
+          <Text style={styles.subtitle}>SECURE TRANSACTION RECORD</Text>
         </View>
 
-        <View style={[styles.outcomeCard, { borderColor: theme.color }]}>
-          <View style={[styles.statusIconContainer, { backgroundColor: theme.iconBg }]}>
-            <Text style={[styles.statusIcon, { color: theme.color }]}>
-              {isMatch ? '✓' : '⚠'}
-            </Text>
+        {/* Shareable Summary Audit Card */}
+        <View style={styles.auditCard}>
+          <View style={styles.badgeSection}>
+            <OutcomeBadge outcome={result.outcome} />
           </View>
-          <Text style={[styles.outcomeTitle, { color: theme.color }]}>{theme.title}</Text>
-          <Text style={styles.outcomeDescription}>{theme.description}</Text>
-        </View>
 
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>Biometric Metrics</Text>
-          
-          <View style={styles.metricRow}>
-            <View style={styles.metricItem}>
-              <Text style={styles.metricLabel}>Facial Confidence</Text>
-              <Text style={[styles.metricValue, isMatch ? styles.colorSuccess : styles.colorWhite]}>
-                {(result.confidence * 100).toFixed(1)}%
-              </Text>
-              <Text style={styles.metricSubtext}>Thresh: 75.0%</Text>
+          {/* User Profile Info (if VERIFIED) */}
+          {result.userName ? (
+            <View style={styles.userSection}>
+              <Text style={styles.userName}>{result.userName}</Text>
+              <Text style={styles.userRole}>Role: {result.role || 'Operator'}</Text>
+              {result.userId && <Text style={styles.userIdText}>ID: {result.userId}</Text>}
             </View>
-
-            <View style={styles.dividerCol} />
-
-            <View style={styles.metricItem}>
-              <Text style={styles.metricLabel}>Liveness Score</Text>
-              <Text
-                style={[
-                  styles.metricValue,
-                  result.livenessScore >= 0.5 ? styles.colorSuccess : styles.colorDanger,
-                ]}
-              >
-                {(result.livenessScore * 100).toFixed(1)}%
-              </Text>
-              <Text style={styles.metricSubtext}>Thresh: 50.0%</Text>
+          ) : (
+            <View style={styles.userSection}>
+              <Text style={styles.userName}>Unidentified Identity</Text>
+              <Text style={styles.userRole}>Biometric verification did not resolve</Text>
             </View>
+          )}
+
+          {/* Timestamp Indicator */}
+          <View style={styles.timestampRow}>
+            <Text style={styles.timestampLabel}>TIMESTAMP</Text>
+            <Text style={styles.timestampValue}>{timestampString}</Text>
+          </View>
+
+          <View style={styles.separator} />
+
+          {/* Scores Progress Bars Section */}
+          <View style={styles.metricsSection}>
+            <Text style={styles.sectionHeader}>Biometric Metrics</Text>
+            
+            {result.confidence !== null && (
+              <ConfidenceBar
+                value={result.confidence}
+                label="Facial Match Confidence"
+              />
+            )}
+            
+            {result.livenessScore !== null && (
+              <ConfidenceBar
+                value={result.livenessScore}
+                label="Liveness Verification Score"
+              />
+            )}
+
+            <View style={styles.pipelineRow}>
+              <Text style={styles.pipelineLabel}>Processing Latency</Text>
+              <Text style={styles.pipelineValue}>{result.pipelineTimeMs} ms</Text>
+            </View>
+          </View>
+
+          <View style={styles.separator} />
+
+          {/* Device & Partition details at bottom */}
+          <View style={styles.cardFooter}>
+            <Text style={styles.footerDetailsText}>Device: {deviceId}</Text>
+            <Text style={styles.footerDetailsText}>Partition: {partition}</Text>
           </View>
         </View>
 
-        {isMatch && (
-          <View style={styles.profileSection}>
-            <Text style={styles.sectionTitle}>Matched Profile</Text>
-            <UserCard user={mockUser} />
-          </View>
-        )}
-
+        {/* Actions */}
         <View style={styles.actions}>
           <Button
-            label="Done"
+            label="Back to Home"
             onPress={() => navigation.navigate('Home')}
-            style={styles.actionBtn}
+            style={styles.homeBtn}
           />
-          {!isMatch && (
-            <Button
-              label="Try Again"
-              onPress={() => navigation.navigate('Verify')}
-              variant="outline"
-              style={styles.actionBtn}
-            />
-          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -136,9 +129,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 24,
     flexGrow: 1,
+    justifyContent: 'space-between',
   },
   header: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
   title: {
     fontFamily: 'System',
@@ -154,113 +148,122 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 2,
   },
-  outcomeCard: {
-    backgroundColor: '#161616',
-    borderWidth: 1.5,
+  auditCard: {
+    backgroundColor: '#111111',
     borderRadius: 16,
-    padding: 24,
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  statusIconContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  statusIcon: {
-    fontSize: 28,
-    fontWeight: 'bold',
-  },
-  outcomeTitle: {
-    fontFamily: 'System',
-    fontSize: 20,
-    fontWeight: '800',
-    letterSpacing: 1,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  outcomeDescription: {
-    fontFamily: 'System',
-    fontSize: 14,
-    color: '#A0A0A0',
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  sectionCard: {
-    backgroundColor: '#161616',
     borderWidth: 1,
     borderColor: '#222222',
-    borderRadius: 12,
-    padding: 16,
+    padding: 24,
+    marginVertical: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  badgeSection: {
+    marginBottom: 20,
+    alignItems: 'center',
+  },
+  userSection: {
+    alignItems: 'center',
     marginBottom: 20,
   },
-  sectionHeader: {
+  userName: {
+    color: '#FFFFFF',
     fontFamily: 'System',
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#A0A0A0',
-    textTransform: 'uppercase',
-    marginBottom: 16,
-    letterSpacing: 1,
-  },
-  metricRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  metricItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  dividerCol: {
-    width: 1,
-    height: 50,
-    backgroundColor: '#222222',
-  },
-  metricLabel: {
-    fontFamily: 'System',
-    fontSize: 12,
-    color: '#A0A0A0',
+    fontSize: 24,
+    fontWeight: '800',
+    textAlign: 'center',
     marginBottom: 4,
   },
-  metricValue: {
-    fontFamily: 'System',
-    fontSize: 28,
-    fontWeight: '900',
-  },
-  metricSubtext: {
-    fontFamily: 'System',
-    fontSize: 11,
-    color: '#666666',
-    marginTop: 2,
-  },
-  profileSection: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
+  userRole: {
+    color: '#00E5FF',
     fontFamily: 'System',
     fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  userIdText: {
+    color: '#666666',
+    fontFamily: 'System',
+    fontSize: 11,
+    fontWeight: '500',
+    marginTop: 6,
+  },
+  timestampRow: {
+    backgroundColor: '#161616',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginVertical: 10,
+  },
+  timestampLabel: {
+    color: '#666666',
+    fontFamily: 'System',
+    fontSize: 10,
     fontWeight: '700',
-    color: '#A0A0A0',
-    textTransform: 'uppercase',
-    marginBottom: 8,
     letterSpacing: 1,
   },
-  actions: {
-    marginTop: 'auto',
-  },
-  actionBtn: {
-    marginVertical: 6,
-  },
-  colorSuccess: {
-    color: '#00C853',
-  },
-  colorDanger: {
-    color: '#FF3B3B',
-  },
-  colorWhite: {
+  timestampValue: {
     color: '#FFFFFF',
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  separator: {
+    height: 1,
+    backgroundColor: '#222222',
+    marginVertical: 16,
+  },
+  metricsSection: {
+    width: '100%',
+  },
+  sectionHeader: {
+    color: '#A0A0A0',
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 1.5,
+    marginBottom: 10,
+  },
+  pipelineRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 10,
+  },
+  pipelineLabel: {
+    color: '#666666',
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  pipelineValue: {
+    color: '#00E5FF',
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  cardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingTop: 8,
+  },
+  footerDetailsText: {
+    color: '#555555',
+    fontFamily: 'System',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  actions: {
+    marginTop: 20,
+    width: '100%',
+  },
+  homeBtn: {
+    height: 50,
   },
 });

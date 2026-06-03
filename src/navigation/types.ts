@@ -1,4 +1,4 @@
-import { RecognitionResult } from '../types';
+import { VerificationResult } from '../types/verification';
 
 export type AuthStackParamList = {
   Login: undefined;
@@ -9,6 +9,6 @@ export type MainStackParamList = {
   Home: undefined;
   Enroll: undefined;
   Verify: undefined;
-  Result: { result: RecognitionResult };
+  Result: { result: VerificationResult };
   Settings: undefined;
 };

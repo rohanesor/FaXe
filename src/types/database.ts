@@ -22,13 +22,16 @@ export interface StoredUser {
   syncStatus: 'pending' | 'synced' | 'failed' | 'inactive_flagged';
 }
 
+import { VerificationOutcome } from './verification';
+
 export interface AuthLogInput {
   userId: string;
-  result: 'success' | 'failure';
+  result: 'success' | 'failure' | 'spoof';
   confidence: number;      // Cosine similarity score
   livenessScore: number;   // Liveness sequence score
-  latitude?: number;       // GPS latitude (optional)
-  longitude?: number;      // GPS longitude (optional)
+  latitude?: number | null;
+  longitude?: number | null;
+  outcome?: VerificationOutcome;
 }
 
 export interface SyncQueueItem {
