@@ -1,12 +1,10 @@
 import { AlignedFaceFrame } from '../../types/camera';
 import { LivenessResult } from '../../types/liveness';
 import { checkPassiveLiveness } from './PassiveLivenessChecker';
+import { ActiveLivenessChallenge, checkEyesOpen } from './ActiveLivenessChallenge';
 
-export { LandmarkTracker } from './LandmarkTracker';
-export type { Landmark } from './LandmarkTracker';
-export { ChallengeDetector } from './ChallengeDetector';
 export { checkPassiveLiveness } from './PassiveLivenessChecker';
-export { LivenessOrchestrator } from './LivenessOrchestrator';
+export { ActiveLivenessChallenge, checkEyesOpen } from './ActiveLivenessChallenge';
 
 /**
  * Runs the biometric liveness detection check:
@@ -17,12 +15,12 @@ export { LivenessOrchestrator } from './LivenessOrchestrator';
  */
 export async function runLivenessCheck(
   getFaceFrame: () => AlignedFaceFrame,
-  runActiveChecks: () => Promise<LivenessResult>
+  runActiveChecks?: () => Promise<LivenessResult>
 ): Promise<LivenessResult> {
   console.log('[Liveness index] Initializing liveness pipeline checks...');
   
   const faceFrame = getFaceFrame();
-  const passive = checkPassiveLiveness(faceFrame);
+  const passive = await checkPassiveLiveness(faceFrame);
 
   // If passive liveness is low (variance indicates spoof screen/print)
   if (!passive.isLive && passive.confidence > 0.6) {
@@ -35,8 +33,19 @@ export async function runLivenessCheck(
     };
   }
 
-  console.log('[Liveness index] Passive check passed. Proceeding to active verification challenges.');
-  
+  console.log('[Liveness index] Passive check passed.');
+
+  if (!runActiveChecks) {
+    return {
+      passed: true,
+      score: passive.confidence,
+      challengeResults: [],
+      reason: 'success',
+    };
+  }
+
+  console.log('[Liveness index] Proceeding to active verification challenges.');
   const activeResult = await runActiveChecks();
   return activeResult;
 }
+

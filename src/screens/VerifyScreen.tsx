@@ -4,9 +4,9 @@ import {
   Text,
   StyleSheet,
   Animated,
-  Image,
   Pressable,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
@@ -15,29 +15,22 @@ import { Button } from '../components/Button';
 import { CameraView } from '../components/CameraView';
 import { cameraManager } from '../modules/camera/CameraManager';
 import { AlignedFaceFrame } from '../types/camera';
-import { ChallengeType, LivenessResult } from '../types/liveness';
-import { LivenessChallenge } from '../components/LivenessChallenge';
-import { LivenessOrchestrator } from '../modules/liveness/LivenessOrchestrator';
-import { Landmark } from '../modules/liveness/LandmarkTracker';
-import { runLivenessCheck } from '../modules/liveness';
+import { LivenessResult } from '../types/liveness';
+import { checkPassiveLiveness, ActiveLivenessChallenge } from '../modules/liveness';
 import { VerificationState, VerificationResult, VerificationOutcome } from '../types/verification';
 import { verificationManager } from '../modules/verification/VerificationManager';
-import { storage } from '../store';
+import { deviceProvisioner } from '../modules/sync/DeviceProvisioner';
+import { RECOGNITION_THRESHOLD } from '../utils/constants';
 
 type Props = StackScreenProps<MainStackParamList, 'Verify'>;
 
 export function VerifyScreen({ navigation }: Props) {
   const [state, setState] = useState<VerificationState>('camera');
+  const [challengeState, setChallengeState] = useState<'none' | 'blink'>('none');
   const [alignedFrame, setAlignedFrame] = useState<AlignedFaceFrame | null>(null);
   const [livenessResult, setLivenessResult] = useState<LivenessResult | null>(null);
   const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
   const [partition, setPartition] = useState('AFR-E-02');
-
-  // Liveness execution UI helper states
-  const [activeLivenessActive, setActiveLivenessActive] = useState(false);
-  const [currentChallenge, setCurrentChallenge] = useState<ChallengeType | null>(null);
-  const [challengeStatus, setChallengeStatus] = useState<'active' | 'passed' | 'failed'>('active');
-  const [progressText, setProgressText] = useState('');
 
   // Animations
   const breathAnim = useRef(new Animated.Value(1.0)).current;
@@ -45,9 +38,15 @@ export function VerifyScreen({ navigation }: Props) {
   const flashAnim = useRef(new Animated.Value(0.0)).current;
   const [flashColor, setFlashColor] = useState<'#00C853' | '#FF3B3B' | 'transparent'>('transparent');
 
+  // Blink challenge state tracking
+  const activeLiveness = useRef(new ActiveLivenessChallenge()).current;
+  const challengeStartTimeRef = useRef<number>(0);
+  const heldFrameRef = useRef<AlignedFaceFrame | null>(null);
+  const isPipelineRunningRef = useRef<boolean>(false);
+
   useEffect(() => {
     // Read current partition from storage
-    const cachedPartition = storage.getString('partition') || 'AFR-E-02';
+    const cachedPartition = deviceProvisioner.getProvisioningData().partition || 'AFR-E-02';
     setPartition(cachedPartition);
 
     // Initial camera permission verification
@@ -113,214 +112,133 @@ export function VerifyScreen({ navigation }: Props) {
     }).start(() => setFlashColor('transparent'));
   }, [flashAnim]);
 
-  // Helper mapping face landmarks for liveness challenge simulations
-  const getSimulatedLandmarksForChallenge = (challenge: ChallengeType, tick: number): Landmark[] => {
-    const baseLandmarks: Landmark[] = [
-      { x: 100, y: 100 }, // 0: Left Eye
-      { x: 200, y: 100 }, // 1: Right Eye
-      { x: 150, y: 150 }, // 2: Nose Tip
-      { x: 110, y: 200 }, // 3: Mouth Left
-      { x: 190, y: 200 }, // 4: Mouth Right
-      { x: 150, y: 240 }, // 5: Chin
-      { x: 0, y: 0.35 },  // 6: Left Eye EAR
-      { x: 0, y: 0.35 },  // 7: Right Eye EAR
-    ];
+  // Continuous Camera fires face aligned event
+  const handleFaceAligned = async (frameData: AlignedFaceFrame, yaw?: number, pitch?: number) => {
+    if (state !== 'camera' || isPipelineRunningRef.current) return;
 
-    switch (challenge) {
-      case ChallengeType.BLINK:
-        if (tick >= 5 && tick <= 7) {
-          baseLandmarks[6].y = 0.05;
-          baseLandmarks[7].y = 0.05;
-        }
-        break;
-      case ChallengeType.SMILE:
-        if (tick >= 5) {
-          baseLandmarks[3].x = 85;
-          baseLandmarks[4].x = 215;
-        }
-        break;
-      case ChallengeType.TURN_LEFT:
-        if (tick >= 5) {
-          baseLandmarks[2].x = 90;
-        }
-        break;
-      case ChallengeType.TURN_RIGHT:
-        if (tick >= 5) {
-          baseLandmarks[2].x = 210;
-        }
-        break;
-      case ChallengeType.NOD:
-        if (tick >= 5 && tick <= 7) {
-          baseLandmarks[2].y = 180;
-        } else if (tick >= 8) {
-          baseLandmarks[2].y = 150;
-        }
-        break;
-    }
-    return baseLandmarks;
-  };
+    // ACTIVE BLINK CHALLENGE MODE
+    if (challengeState === 'blink') {
+      // Check timeout (6 seconds to perform a blink)
+      const elapsed = Date.now() - challengeStartTimeRef.current;
+      if (elapsed > 6000) {
+        console.log('[VerifyScreen] Active blink challenge timed out.');
+        setChallengeState('none');
+        setVerificationResult({
+          outcome: VerificationOutcome.SPOOF_DETECTED,
+          userId: null,
+          userName: null,
+          role: null,
+          confidence: null,
+          livenessScore: 0.15,
+          pipelineTimeMs: elapsed,
+          message: 'Blink challenge timed out. Spoof suspected.',
+        });
+        triggerFlash('#FF3B3B');
+        setState('done');
+        return;
+      }
 
-  // Step 1: Camera fires face aligned event
-  const handleFaceAligned = (frameData: AlignedFaceFrame) => {
-    console.log('[VerifyScreen] Face aligned, freezing frame and starting liveness checks...');
-    setAlignedFrame(frameData);
-    setState('liveness');
-  };
+      // Process frame for blink detection
+      try {
+        const result = await activeLiveness.processFrame(frameData.base64jpeg);
+        if (result.isBlinkDetected) {
+          console.log('[VerifyScreen] Active blink challenge PASSED!');
+          setChallengeState('none');
+          isPipelineRunningRef.current = true;
+          setState('processing');
 
-  // Step 2: Running Liveness loop on state enter
-  useEffect(() => {
-    if (state === 'liveness' && alignedFrame) {
-      let isSubscribed = true;
-
-      const executeLiveness = async () => {
-        try {
-          const runActiveChecks = () => {
-            return new Promise<LivenessResult>((resolve) => {
-              const orchestrator = new LivenessOrchestrator();
-              orchestrator.startSession();
-
-              if (!isSubscribed) return;
-              setActiveLivenessActive(true);
-              setCurrentChallenge(orchestrator.getCurrentChallenge());
-              setChallengeStatus('active');
-              setProgressText(orchestrator.getProgressText());
-
-              let simTick = 0;
-              let timer: any;
-
-              const feedLoop = () => {
-                if (!isSubscribed) {
-                  clearInterval(timer);
-                  return;
-                }
-
-                const curChallenge = orchestrator.getCurrentChallenge();
-                if (!curChallenge) {
-                  clearInterval(timer);
-                  return;
-                }
-
-                simTick++;
-                const mockLandmarks = getSimulatedLandmarksForChallenge(curChallenge, simTick);
-                const feed = orchestrator.feedLandmarks(mockLandmarks);
-
-                if (feed.passed) {
-                  setChallengeStatus('passed');
-                  clearInterval(timer);
-
-                  setTimeout(() => {
-                    if (!isSubscribed) return;
-                    if (feed.completed) {
-                      setActiveLivenessActive(false);
-                      resolve(feed.result!);
-                    } else {
-                      setCurrentChallenge(orchestrator.getCurrentChallenge());
-                      setChallengeStatus('active');
-                      setProgressText(orchestrator.getProgressText());
-                      simTick = 0;
-                      timer = setInterval(feedLoop, 200);
-                    }
-                  }, 1000);
-                } else if (feed.completed) {
-                  clearInterval(timer);
-                  setChallengeStatus('failed');
-
-                  setTimeout(() => {
-                    if (!isSubscribed) return;
-                    setActiveLivenessActive(false);
-                    resolve(feed.result!);
-                  }, 1000);
-                }
-              };
-
-              timer = setInterval(feedLoop, 200);
-            });
+          // Proceed to database matching with the initially held sharp frame
+          const matchingFrame = heldFrameRef.current || frameData;
+          const dummyLivenessResult: LivenessResult = {
+            passed: true,
+            score: 0.95,
+            challengeResults: [],
+            reason: 'success',
           };
 
-          // Run the full liveness check wrapper
-          const result = await runLivenessCheck(() => alignedFrame, runActiveChecks);
-
-          if (isSubscribed) {
-            setLivenessResult(result);
-            setState('processing');
+          const res = await verificationManager.verifyUser(matchingFrame, dummyLivenessResult, partition);
+          setVerificationResult(res);
+          if (res.outcome === VerificationOutcome.VERIFIED) {
+            triggerFlash('#00C853');
+          } else {
+            triggerFlash('#FF3B3B');
           }
-        } catch (err) {
-          console.error('[VerifyScreen] Liveness loop failed:', err);
-          if (isSubscribed) {
-            setVerificationResult({
-              outcome: VerificationOutcome.ERROR,
-              userId: null,
-              userName: null,
-              role: null,
-              confidence: null,
-              livenessScore: 0.0,
-              pipelineTimeMs: 0,
-              message: 'Liveness sequence check failed with a system exception.',
-            });
-            setState('done');
-          }
+          setState('done');
+          isPipelineRunningRef.current = false;
         }
-      };
-
-      executeLiveness();
-
-      return () => {
-        isSubscribed = false;
-      };
+      } catch (err) {
+        console.error('[VerifyScreen] Error processing active liveness frame:', err);
+      }
+      return;
     }
-  }, [state, alignedFrame]);
 
-  // Step 3: Run database scan during 'processing'
-  useEffect(() => {
-    if (state === 'processing' && alignedFrame && livenessResult) {
-      let isSubscribed = true;
+    // SILENT PASSIVE Liveness Mode (Runs on first detected face frame)
+    try {
+      isPipelineRunningRef.current = true;
+      const passive = await checkPassiveLiveness(frameData);
 
-      const runAuthMatching = async () => {
-        try {
-          const res = await verificationManager.verifyUser(alignedFrame, livenessResult, partition);
+      // 1. Live Skin (LBP variance > 25) -> Direct Instant Pass
+      if (passive.isLive) {
+        const mappedLivenessResult: LivenessResult = {
+          passed: passive.isLive,
+          score: passive.confidence,
+          challengeResults: [],
+          reason: passive.isLive ? 'success' : 'spoof_suspected',
+        };
+        setAlignedFrame(frameData);
+        setLivenessResult(mappedLivenessResult);
+        setState('processing');
 
-          if (isSubscribed) {
-            setVerificationResult(res);
-
-            // Execute corresponding feedback flash
-            if (res.outcome === VerificationOutcome.VERIFIED) {
-              triggerFlash('#00C853'); // Green
-            } else if (res.outcome === VerificationOutcome.SPOOF_DETECTED) {
-              triggerFlash('#FF3B3B'); // Red
-            }
-
-            setState('done');
-          }
-        } catch (err: any) {
-          console.error('[VerifyScreen] Verification execution error:', err);
-          if (isSubscribed) {
-            setVerificationResult({
-              outcome: VerificationOutcome.ERROR,
-              userId: null,
-              userName: null,
-              role: null,
-              confidence: null,
-              livenessScore: livenessResult.score,
-              pipelineTimeMs: 0,
-              message: err.message || 'An unexpected error occurred during database face matching.',
-            });
-            setState('done');
-          }
+        const res = await verificationManager.verifyUser(frameData, mappedLivenessResult, partition);
+        setVerificationResult(res);
+        if (res.outcome === VerificationOutcome.VERIFIED) {
+          triggerFlash('#00C853');
+        } else {
+          triggerFlash('#FF3B3B');
         }
-      };
-
-      runAuthMatching();
-
-      return () => {
-        isSubscribed = false;
-      };
+        setState('done');
+        isPipelineRunningRef.current = false;
+      }
+      // 2. Borderline Spoof (variance between 12.0 and 25.0) -> Trigger Active Blink Challenge
+      else if (passive.variance >= 12.0 && passive.variance <= 25.0) {
+        console.log(`[VerifyScreen] Borderline liveness detected (variance: ${passive.variance.toFixed(2)}). Launching Active Blink Challenge...`);
+        heldFrameRef.current = frameData;
+        activeLiveness.reset();
+        challengeStartTimeRef.current = Date.now();
+        setChallengeState('blink');
+        isPipelineRunningRef.current = false; // release lock to capture blink frames
+      }
+      // 3. Flat Spoof (variance < 12.0) -> Immediate Outright Reject
+      else {
+        console.log(`[VerifyScreen] Outright passive liveness failed (variance: ${passive.variance.toFixed(2)}). Blocked.`);
+        setVerificationResult({
+          outcome: VerificationOutcome.SPOOF_DETECTED,
+          userId: null,
+          userName: null,
+          role: null,
+          confidence: null,
+          livenessScore: passive.variance / 100,
+          pipelineTimeMs: 0,
+          message: 'Spoof detected via passive texture check.',
+        });
+        triggerFlash('#FF3B3B');
+        setState('done');
+        isPipelineRunningRef.current = false;
+      }
+    } catch (err: any) {
+      console.error('[VerifyScreen] Passive pipeline check failed:', err);
+      setState('done');
+      isPipelineRunningRef.current = false;
     }
-  }, [state, alignedFrame, livenessResult, partition, triggerFlash]);
+  };
 
   const handleReset = () => {
     setAlignedFrame(null);
     setLivenessResult(null);
     setVerificationResult(null);
+    heldFrameRef.current = null;
+    isPipelineRunningRef.current = false;
+    setChallengeState('none');
     setState('camera');
   };
 
@@ -333,7 +251,7 @@ export function VerifyScreen({ navigation }: Props) {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Absolute Flash Overlay for UI transitions */}
+      {/* Absolute Flash Overlay */}
       {flashColor !== 'transparent' && (
         <Animated.View
           style={[
@@ -350,42 +268,34 @@ export function VerifyScreen({ navigation }: Props) {
       {/* STATE 1: CAMERA */}
       {state === 'camera' && (
         <View style={styles.fullscreenContainer}>
-          <CameraView onFaceAligned={handleFaceAligned} isActive={true} />
+          <CameraView
+            onFaceAligned={handleFaceAligned}
+            isActive={true}
+            isEnrollment={false}
+          />
           
           <View style={styles.cameraOverlayHeader}>
             <Pressable style={styles.cancelButton} onPress={() => navigation.goBack()}>
               <Text style={styles.cancelText}>✕ Cancel</Text>
             </Pressable>
-            <Text style={styles.topBannerText}>Look into the camera to verify identity</Text>
+            <Text style={styles.topBannerText}>
+              {challengeState === 'blink'
+                ? 'BLINK ONCE TO VERIFY LIVENESS'
+                : 'Look into the camera to verify identity'}
+            </Text>
           </View>
+
+          {/* Active Liveness Challenge Glassmorphic Overlay */}
+          {challengeState === 'blink' && (
+            <View style={styles.challengeBox}>
+              <ActivityIndicator size="small" color="#00FF88" style={{ marginBottom: 8 }} />
+              <Text style={styles.challengeTitle}>Active Liveness Check</Text>
+              <Text style={styles.challengeSubtitle}>Please blink once to verify you are a live operator</Text>
+            </View>
+          )}
 
           <View style={styles.cameraOverlayFooter}>
             <Text style={styles.partitionTag}>Local Cache Partition: {partition}</Text>
-          </View>
-        </View>
-      )}
-
-      {/* STATE 2: LIVENESS */}
-      {state === 'liveness' && alignedFrame && (
-        <View style={styles.fullscreenContainer}>
-          <Image
-            source={{ uri: alignedFrame.base64jpeg }}
-            style={[StyleSheet.absoluteFill, styles.frozenPreview]}
-            resizeMode="cover"
-          />
-          
-          {activeLivenessActive && currentChallenge && (
-            <LivenessChallenge
-              challenge={currentChallenge}
-              onComplete={() => {}} // Hooked inside liveness feed promise loops
-              status={challengeStatus}
-              progressText={progressText}
-              timeoutSeconds={4}
-            />
-          )}
-
-          <View style={styles.livenessOverlayFooter}>
-            <Text style={styles.livenessWarningText}>Anti-spoofing check in progress</Text>
           </View>
         </View>
       )}
@@ -438,7 +348,7 @@ export function VerifyScreen({ navigation }: Props) {
                     Match confidence: {((verificationResult.confidence || 0) * 100).toFixed(0)}%
                   </Text>
                   <Text style={styles.metricItemText}>
-                    Liveness score: {((verificationResult.livenessScore || 0) * 100).toFixed(0)}%
+                    Liveness status: Verified 🟢
                   </Text>
                   <Text style={styles.metricItemText}>
                     Verified in {verificationResult.pipelineTimeMs}ms
@@ -478,7 +388,7 @@ export function VerifyScreen({ navigation }: Props) {
                     Best match: {((verificationResult.confidence || 0) * 100).toFixed(0)}%
                   </Text>
                   <Text style={styles.metricItemText}>
-                    Threshold required: 75%
+                    Threshold required: {Math.round(RECOGNITION_THRESHOLD * 100)}%
                   </Text>
                 </View>
 
@@ -501,7 +411,7 @@ export function VerifyScreen({ navigation }: Props) {
                 </View>
                 <Text style={styles.failTitleText}>Spoofing attempt detected</Text>
                 <Text style={styles.failSubtext}>
-                  Please present your real face. Photos and screens are not accepted.
+                  Please present your real face. Photos, masks, and screens are not accepted.
                 </Text>
 
                 <View style={styles.metricsBox}>
@@ -557,6 +467,16 @@ export function VerifyScreen({ navigation }: Props) {
                 </Text>
 
                 <View style={styles.doneActions}>
+                  {verificationResult.message &&
+                   (verificationResult.message.toLowerCase().includes('corrupted') ||
+                    verificationResult.message.toLowerCase().includes('re-enroll')) && (
+                    <Button
+                      label="Re-enroll Users"
+                      onPress={() => navigation.navigate('Enroll')}
+                      variant="primary"
+                      style={styles.doneBtn}
+                    />
+                  )}
                   <Button
                     label="Try Again"
                     onPress={handleReset}
@@ -582,8 +502,13 @@ const styles = StyleSheet.create({
     flex: 1,
     position: 'relative',
   },
-  frozenPreview: {
-    opacity: 0.4,
+  flashOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 999,
   },
   cameraOverlayHeader: {
     position: 'absolute',
@@ -600,7 +525,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#333',
+    borderColor: '#33,',
     marginBottom: 20,
   },
   cancelText: {
@@ -612,7 +537,7 @@ const styles = StyleSheet.create({
   topBannerText: {
     color: '#FFF',
     fontFamily: 'System',
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     textAlign: 'center',
     backgroundColor: 'rgba(10, 10, 10, 0.85)',
@@ -638,125 +563,138 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     borderRadius: 4,
   },
-  livenessOverlayFooter: {
+  challengeBox: {
     position: 'absolute',
-    bottom: 40,
+    top: '50%',
     left: 20,
     right: 20,
+    transform: [{ translateY: 130 }],
+    backgroundColor: 'rgba(10, 10, 10, 0.9)',
+    borderColor: '#00FF88',
+    borderWidth: 1.5,
+    borderRadius: 16,
+    padding: 16,
     alignItems: 'center',
+    zIndex: 25,
   },
-  livenessWarningText: {
-    color: '#00E5FF',
+  challengeTitle: {
+    color: '#00FF88',
+    fontFamily: 'System',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  challengeSubtitle: {
+    color: '#FFFFFF',
     fontFamily: 'System',
     fontSize: 13,
+    textAlign: 'center',
     fontWeight: '600',
-    letterSpacing: 1,
-    textTransform: 'uppercase',
   },
   processingContainer: {
     flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
     backgroundColor: '#0A0A0A',
+  },
+  breathingCircle: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: 'rgba(0, 229, 255, 0.07)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  breathingCircle: {
+  innerProcessingCircle: {
     width: 90,
     height: 90,
     borderRadius: 45,
-    backgroundColor: 'rgba(0, 229, 255, 0.12)',
-    borderWidth: 2,
+    backgroundColor: 'rgba(0, 229, 255, 0.15)',
+    borderWidth: 1.5,
     borderColor: '#00E5FF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  innerProcessingCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#00E5FF',
   },
   processingText: {
-    fontFamily: 'System',
-    fontSize: 16,
-    fontWeight: '700',
     color: '#FFFFFF',
+    fontFamily: 'System',
+    fontSize: 18,
+    fontWeight: '800',
+    marginTop: 24,
     letterSpacing: 0.5,
   },
   doneContainer: {
     flex: 1,
     backgroundColor: '#0A0A0A',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   doneScrollContent: {
     flexGrow: 1,
     justifyContent: 'center',
+    alignItems: 'center',
+    width: '100%',
     padding: 24,
   },
   outcomeSubContainer: {
+    width: '100%',
     alignItems: 'center',
-    backgroundColor: '#161616',
-    borderRadius: 20,
+    backgroundColor: '#121212',
     borderWidth: 1,
     borderColor: '#222222',
-    paddingVertical: 40,
-    paddingHorizontal: 24,
-    width: '100%',
+    borderRadius: 20,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 15,
+    elevation: 10,
   },
   successIconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(0, 200, 83, 0.1)',
-    borderWidth: 2,
-    borderColor: '#00C853',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#00C853',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
   },
   successCheckmark: {
-    color: '#00C853',
+    color: '#FFFFFF',
     fontSize: 36,
     fontWeight: '900',
   },
   failedIconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 59, 59, 0.1)',
-    borderWidth: 2,
-    borderColor: '#FF3B3B',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#FF3B3B',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
   },
   failedCross: {
-    color: '#FF3B3B',
+    color: '#FFFFFF',
     fontSize: 32,
-    fontWeight: '700',
+    fontWeight: '900',
   },
   spoofIconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 59, 59, 0.15)',
-    borderWidth: 2.5,
-    borderColor: '#FF3B3B',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#FF9100',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
   },
   spoofExclamation: {
-    color: '#FF3B3B',
-    fontSize: 40,
+    color: '#FFFFFF',
+    fontSize: 36,
     fontWeight: '900',
   },
   warningIconCircle: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 214, 0, 0.1)',
-    borderWidth: 2,
-    borderColor: '#FFD600',
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: '#FFD600',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 20,
@@ -765,40 +703,42 @@ const styles = StyleSheet.create({
     fontSize: 32,
   },
   userNameText: {
-    fontFamily: 'System',
-    fontSize: 28,
-    fontWeight: '800',
     color: '#FFFFFF',
+    fontFamily: 'System',
+    fontSize: 24,
+    fontWeight: '900',
     marginBottom: 8,
     textAlign: 'center',
   },
   roleBadge: {
     paddingHorizontal: 12,
     paddingVertical: 5,
-    borderRadius: 12,
-    marginBottom: 24,
+    borderRadius: 6,
+    marginBottom: 20,
   },
   roleBadgeText: {
     color: '#FFFFFF',
     fontFamily: 'System',
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '800',
+    textTransform: 'uppercase',
   },
   failTitleText: {
+    color: '#FFFFFF',
     fontFamily: 'System',
     fontSize: 22,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    marginBottom: 10,
+    fontWeight: '900',
+    marginBottom: 8,
     textAlign: 'center',
   },
   failSubtext: {
+    color: '#A0A0A0',
     fontFamily: 'System',
     fontSize: 14,
-    color: '#A0A0A0',
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 24,
+    paddingHorizontal: 12,
   },
   metricsBox: {
     width: '100%',
@@ -807,25 +747,23 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#222222',
     padding: 16,
-    marginBottom: 28,
+    marginBottom: 24,
   },
   metricItemText: {
-    color: '#FFFFFF',
+    color: '#888888',
     fontFamily: 'System',
     fontSize: 13,
     fontWeight: '600',
     marginVertical: 4,
-    letterSpacing: 0.5,
+    textAlign: 'center',
   },
   doneActions: {
     width: '100%',
+    flexDirection: 'column',
   },
   doneBtn: {
+    width: '100%',
+    height: 48,
     marginVertical: 6,
-    height: 50,
-  },
-  flashOverlay: {
-    ...StyleSheet.absoluteFill,
-    zIndex: 999,
   },
 });
