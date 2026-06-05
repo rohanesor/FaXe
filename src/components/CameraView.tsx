@@ -1,30 +1,82 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { View, Text, StyleSheet, useWindowDimensions, Animated } from 'react-native';
-import { Camera } from 'react-native-vision-camera';
+import { Camera, CameraRef } from 'react-native-vision-camera';
 import { cameraManager } from '../modules/camera/CameraManager';
-import { alignFace } from '../modules/camera/FaceAligner';
 import { AlignedFaceFrame } from '../types/camera';
+import { Images } from 'react-native-nitro-image';
 
-interface CameraViewProps {
-  onFaceAligned: (frameData: AlignedFaceFrame) => void;
+import { BlazeFaceDetector } from '../modules/recognition/BlazeFaceDetector';
+import { FacePreprocessor } from '../modules/recognition/FacePreprocessor';
+import { analyzeImageQuality, QualityMetrics } from '../modules/recognition/ImageQualityAnalyzer';
+
+interface LocalCameraViewProps {
+  onFaceAligned: (frameData: AlignedFaceFrame, yaw: number, pitch: number) => void;
   isActive: boolean;
+  isLivenessBackground?: boolean;
+  isEnrollment?: boolean;
+  targetPose?: 'Front' | 'Left' | 'Right' | 'Up' | 'Down';
+  baselineYaw?: number;
+  baselinePitch?: number;
 }
 
-export function CameraView({ onFaceAligned, isActive }: CameraViewProps) {
+function encodeBase64(bytes: Uint8Array): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  let i = 0;
+  const l = bytes.length;
+  for (i = 0; i < l; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < l ? bytes[i + 1] : 0;
+    const b2 = i + 2 < l ? bytes[i + 2] : 0;
+    
+    const c0 = b0 >> 2;
+    const c1 = ((b0 & 3) << 4) | (b1 >> 4);
+    const c2 = i + 1 < l ? (((b1 & 15) << 2) | (b2 >> 6)) : 64;
+    const c3 = i + 2 < l ? (b2 & 63) : 64;
+    
+    result += alphabet[c0];
+    result += alphabet[c1];
+    result += c2 === 64 ? '=' : alphabet[c2];
+    result += c3 === 64 ? '=' : alphabet[c3];
+  }
+  return result;
+}
+
+export function CameraView({
+  onFaceAligned,
+  isActive,
+  isLivenessBackground = false,
+  isEnrollment = false,
+  targetPose = 'Front',
+  baselineYaw = 0,
+  baselinePitch = 0,
+}: LocalCameraViewProps) {
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [alignmentState, setAlignmentState] = useState<'none' | 'far' | 'off-center' | 'aligned' | 'multiple'>('none');
-  const [simulatedFace, setSimulatedFace] = useState<{ x: number, y: number, width: number, height: number } | null>(null);
   
-  const scanAnim = useRef(new Animated.Value(0)).current;
+  // Real-time face bounding box on screen
+  const [faceBox, setFaceBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
 
-  const ovalWidth = 220;
-  const ovalHeight = 280;
-  const ovalCenterX = screenWidth / 2;
-  const ovalCenterY = screenHeight / 2 - 40;
+  // HUD quality metrics state variables
+  const [faceDetected, setFaceDetected] = useState<boolean>(false);
+  const [lightingStatus, setLightingStatus] = useState<'Good' | 'Low Light' | 'Too Bright'>('Good');
+  const [blurScore, setBlurScore] = useState<number>(0);
+  const [blurStatus, setBlurStatus] = useState<'Sharp' | 'Blurry'>('Blurry');
+  const [poseDetected, setPoseDetected] = useState<'Front' | 'Left' | 'Right' | 'Up' | 'Down'>('Front');
+
+  // Animation values
+  const radarAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1.0)).current;
+  const cameraRef = useRef<CameraRef>(null);
+
+  // Central circular scanner guide settings
+  const circleSize = 250;
+  const circleCenterX = screenWidth / 2;
+  const circleCenterY = screenHeight * 0.40;
 
   const device = cameraManager.getFrontCamera();
 
+  // Permissions
   useEffect(() => {
     let active = true;
     const checkPerms = async () => {
@@ -37,134 +89,204 @@ export function CameraView({ onFaceAligned, isActive }: CameraViewProps) {
     return () => { active = false; };
   }, []);
 
+  // Radar circular rotation/pulsing animation
   useEffect(() => {
-    if (isActive) {
+    if (isActive && !isLivenessBackground) {
+      Animated.loop(
+        Animated.timing(radarAnim, {
+          toValue: 1,
+          duration: 4000,
+          useNativeDriver: true,
+        })
+      ).start();
+
       Animated.loop(
         Animated.sequence([
-          Animated.timing(scanAnim, {
-            toValue: 1,
-            duration: 3000,
+          Animated.timing(pulseAnim, {
+            toValue: 1.1,
+            duration: 1000,
             useNativeDriver: true,
           }),
-          Animated.timing(scanAnim, {
-            toValue: 0,
-            duration: 3000,
+          Animated.timing(pulseAnim, {
+            toValue: 1.0,
+            duration: 1000,
             useNativeDriver: true,
           }),
         ])
       ).start();
     } else {
-      scanAnim.setValue(0);
+      radarAnim.setValue(0);
+      pulseAnim.setValue(1.0);
     }
-  }, [isActive, scanAnim]);
+  }, [isActive, isLivenessBackground, radarAnim, pulseAnim]);
 
+  // Main high-frequency analysis loop
   useEffect(() => {
-    if (!isActive) {
-      setSimulatedFace(null);
-      setAlignmentState('none');
+    if (isLivenessBackground || !isActive) {
+      setFaceBox(null);
+      setFaceDetected(false);
       return;
     }
 
-    let intervalId: any;
-    let ticks = 0;
+    let isMounted = true;
+    let loopTimeoutId: any;
 
-    intervalId = setInterval(() => {
-      ticks += 1;
-      
-      if (ticks <= 4) {
-        setSimulatedFace(null);
-        setAlignmentState('none');
-      }
-      else if (ticks <= 9) {
-        setSimulatedFace({
-          x: ovalCenterX - 35,
-          y: ovalCenterY - 45,
-          width: 70,
-          height: 90,
-        });
-        setAlignmentState('far');
-      }
-      else if (ticks <= 13) {
-        setSimulatedFace({
-          x: ovalCenterX - 110,
-          y: ovalCenterY - 80,
-          width: 110,
-          height: 140,
-        });
-        setAlignmentState('multiple');
-      }
-      else if (ticks <= 18) {
-        setSimulatedFace({
-          x: ovalCenterX - 140,
-          y: ovalCenterY + 20,
-          width: 140,
-          height: 180,
-        });
-        setAlignmentState('off-center');
-      }
-      else if (ticks <= 24) {
-        const targetFace = {
-          x: ovalCenterX - (ovalWidth * 0.95) / 2,
-          y: ovalCenterY - (ovalHeight * 0.95) / 2,
-          width: ovalWidth * 0.95,
-          height: ovalHeight * 0.95,
-        };
-        setSimulatedFace(targetFace);
-        setAlignmentState('aligned');
-        
-        if (ticks === 24) {
-          clearInterval(intervalId);
-          alignFace(targetFace, screenWidth, screenHeight).then((alignedFrame) => {
-            console.log('[CameraView] Face successfully aligned & cropped frame output:', alignedFrame);
-            onFaceAligned(alignedFrame);
-          });
+    const runAnalysisLoop = async () => {
+      if (!isMounted || isLivenessBackground || !isActive) return;
+
+      try {
+        if (hasPermission && device && cameraRef.current) {
+          // 1. Take snapshot
+          const image = await cameraRef.current.takeSnapshot();
+          if (!isMounted) return;
+
+          // 2. Crop center square to avoid aspect ratio squeezing/stretching
+          const squareSize = Math.min(image.width, image.height);
+          const startX = Math.max(0, Math.round((image.width - squareSize) / 2));
+          const startY = Math.max(0, Math.round((image.height - squareSize) / 2));
+
+          const squareCrop = await image.cropAsync(startX, startY, squareSize, squareSize);
+          const squareResized = await squareCrop.resizeAsync(256, 256);
+
+          // 3. Encode resized square to base64 jpeg for detector
+          const encoded = await squareResized.toEncodedImageDataAsync('jpg', 80);
+          const base64SquareJpeg = 'data:image/jpeg;base64,' + encodeBase64(new Uint8Array(encoded.buffer));
+
+          // 4. Run BlazeFace inference
+          const detections = await BlazeFaceDetector.detect(base64SquareJpeg, 0.65);
+          if (!isMounted) return;
+
+          if (detections.length > 0) {
+            // Pick primary face
+            const face = detections[0];
+
+            // 5. Compute horizontal eye alignment & center crop face natively (112x112)
+            const alignedJsi = await FacePreprocessor.alignAndCropFace(
+              squareResized,
+              face.boundingBox,
+              face.landmarks
+            );
+
+            // Convert aligned crop to base64 for embedding/liveness
+            const alignedEncoded = await alignedJsi.toEncodedImageDataAsync('jpg', 85);
+            const alignedBase64 = 'data:image/jpeg;base64,' + encodeBase64(new Uint8Array(alignedEncoded.buffer));
+
+            // 6. Analyze quality metrics of the aligned crop
+            const metrics = await analyzeImageQuality(alignedBase64);
+            if (!isMounted) return;
+
+            // Update UI states
+            setFaceDetected(true);
+            setLightingStatus(metrics.lightingStatus);
+            setBlurScore(metrics.blurScore);
+            setBlurStatus(metrics.blurStatus);
+            setPoseDetected(metrics.poseDetected);
+
+            // 7. Calculate pixel coordinates of bounding box relative to screen
+            // Since square resized maps to center square area on screen:
+            const screenSquareSize = Math.min(screenWidth, screenHeight);
+            const screenStartX = (screenWidth - screenSquareSize) / 2;
+            const screenStartY = (screenHeight - screenSquareSize) / 2;
+
+            // Map [0, 1] relative to square crop
+            const left = screenStartX + face.boundingBox.x * screenSquareSize;
+            const top = screenStartY + face.boundingBox.y * screenSquareSize;
+            const width = face.boundingBox.width * screenSquareSize;
+            const height = face.boundingBox.height * screenSquareSize;
+
+            setFaceBox({ x: left, y: top, width, height });
+
+            // 8. Fire callback if the frame is sharp and lighting is okay
+            // Auto-accept lighting in low-light since we perform auto-enhancement
+            console.log(`[CameraView] Face detected: score=${face.score.toFixed(2)}, blur=${metrics.blurScore.toFixed(1)} (${metrics.blurStatus}), yaw=${metrics.rawYaw.toFixed(3)}, pitch=${metrics.rawPitch.toFixed(3)}`);
+            if (metrics.blurStatus === 'Sharp') {
+              onFaceAligned(
+                {
+                  timestamp: Date.now(),
+                  width: 112,
+                  height: 112,
+                  base64jpeg: alignedBase64,
+                },
+                metrics.rawYaw,
+                metrics.rawPitch
+              );
+            }
+          } else {
+            // No face detected
+            setFaceDetected(false);
+            setFaceBox(null);
+          }
         }
+      } catch (err) {
+        console.warn('[CameraView] Continuous analysis loop warning:', err);
       }
-    }, 500);
 
-    return () => clearInterval(intervalId);
-  }, [isActive, ovalCenterX, ovalCenterY, screenWidth, screenHeight, onFaceAligned]);
+      // Schedule next run (150ms interval for fast, responsive Face ID flow)
+      if (isMounted) {
+        loopTimeoutId = setTimeout(runAnalysisLoop, 150);
+      }
+    };
 
-  const getBorderColor = () => {
-    switch (alignmentState) {
-      case 'aligned':
-        return '#00C853';
-      case 'multiple':
-      case 'off-center':
-        return '#FF3B3B';
-      case 'far':
-      case 'none':
-      default:
-        return '#FFB300';
-    }
+    // Wait 800ms for camera initialization
+    loopTimeoutId = setTimeout(runAnalysisLoop, 800);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(loopTimeoutId);
+    };
+  }, [
+    isActive,
+    isLivenessBackground,
+    screenWidth,
+    screenHeight,
+    onFaceAligned,
+    hasPermission,
+    device,
+  ]);
+
+  const radarSpin = radarAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  const getGuideColor = () => {
+    if (!faceDetected) return '#666666';
+    if (blurStatus === 'Blurry') return '#FFD600'; // warning yellow for blur
+    return '#00FF88'; // green for sharp/perfect
   };
 
   const getStatusText = () => {
-    switch (alignmentState) {
-      case 'aligned':
-        return 'Hold still... Aligned!';
-      case 'multiple':
-        return 'Multiple faces detected!';
-      case 'off-center':
-        return 'Center your face';
-      case 'far':
-        return 'Move closer';
-      case 'none':
-      default:
-        return 'Align face within oval guide';
-    }
+    if (!faceDetected) return 'Looking for face...';
+    if (blurStatus === 'Blurry') return 'Hold still (focusing)...';
+    if (lightingStatus === 'Low Light') return 'Scanning (Enhancing Low Light)...';
+    return 'Scanning face...';
   };
 
-  const translateY = scanAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, ovalHeight],
-  });
+  if (isLivenessBackground) {
+    return (
+      <View style={[styles.container, { backgroundColor: 'transparent' }]}>
+        {hasPermission && device ? (
+          <Camera
+            ref={cameraRef}
+            style={styles.fullscreenCamera}
+            device={device}
+            isActive={isActive}
+          />
+        ) : (
+          <View style={[styles.cameraMock, { opacity: 0.3 }]}>
+            <Text style={styles.mockText}>Liveness Cam Active</Text>
+          </View>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
       {hasPermission && device ? (
         <Camera
-          style={StyleSheet.absoluteFill}
+          ref={cameraRef}
+          style={styles.fullscreenCamera}
           device={device}
           isActive={isActive}
         />
@@ -172,89 +294,97 @@ export function CameraView({ onFaceAligned, isActive }: CameraViewProps) {
         <View style={styles.cameraMock}>
           <View style={styles.gridLineH} />
           <View style={styles.gridLineV} />
-          <Text style={styles.mockText}>Biometric Viewfinder: OFF-GRID ACTIVE</Text>
+          <Text style={styles.mockText}>Camera Viewfinder</Text>
         </View>
       )}
 
       <View style={styles.overlayContainer}>
-        <View
-          style={[
-            styles.ovalGuide,
-            {
-              width: ovalWidth,
-              height: ovalHeight,
-              top: ovalCenterY - ovalHeight / 2,
-              left: ovalCenterX - ovalWidth / 2,
-              borderColor: getBorderColor(),
-            },
-          ]}
-        >
-          {isActive && (
-            <Animated.View
-              style={[
-                styles.scanningLine,
-                {
-                  transform: [{ translateY: translateY }],
-                  backgroundColor: getBorderColor(),
-                  shadowColor: getBorderColor(),
-                },
-              ]}
-            />
-          )}
-
-          <View style={[styles.reticleCorner, styles.topLeft, { borderColor: getBorderColor() }]} />
-          <View style={[styles.reticleCorner, styles.topRight, { borderColor: getBorderColor() }]} />
-          <View style={[styles.reticleCorner, styles.bottomLeft, { borderColor: getBorderColor() }]} />
-          <View style={[styles.reticleCorner, styles.bottomRight, { borderColor: getBorderColor() }]} />
-        </View>
-
-        {simulatedFace && (
+        {/* Apple Face ID-like Circular Scanner Frame */}
+        <View style={styles.scannerOuterContainer}>
+          <Animated.View
+            style={[
+              styles.radarRing,
+              {
+                width: circleSize,
+                height: circleSize,
+                top: circleCenterY - circleSize / 2,
+                left: circleCenterX - circleSize / 2,
+                borderColor: getGuideColor(),
+                transform: [{ rotate: radarSpin }, { scale: pulseAnim }],
+              },
+            ]}
+          />
           <View
             style={[
-              styles.faceBoundingBox,
+              styles.radarCircle,
               {
-                left: simulatedFace.x,
-                top: simulatedFace.y,
-                width: simulatedFace.width,
-                height: simulatedFace.height,
-                borderColor: getBorderColor(),
+                width: circleSize - 6,
+                height: circleSize - 6,
+                top: circleCenterY - (circleSize - 6) / 2,
+                left: circleCenterX - (circleSize - 6) / 2,
+                borderColor: getGuideColor() + '44', // Semi-transparent border
+              },
+            ]}
+          />
+        </View>
+
+        {/* Dynamic Face Box Reticle */}
+        {faceBox && (
+          <View
+            style={[
+              styles.faceReticle,
+              {
+                left: faceBox.x,
+                top: faceBox.y,
+                width: faceBox.width,
+                height: faceBox.height,
+                borderColor: getGuideColor(),
               },
             ]}
           >
-            <View style={[styles.boxBracket, styles.bracketTL, { borderColor: getBorderColor() }]} />
-            <View style={[styles.boxBracket, styles.bracketTR, { borderColor: getBorderColor() }]} />
-            <View style={[styles.boxBracket, styles.bracketBL, { borderColor: getBorderColor() }]} />
-            <View style={[styles.boxBracket, styles.bracketBR, { borderColor: getBorderColor() }]} />
-            
-            <View style={[styles.labelTag, { backgroundColor: getBorderColor() }]}>
-              <Text style={styles.labelText}>
-                {alignmentState === 'aligned' ? 'FACE: ALIGNED 94%' : 'FACE SCANNING'}
+            <View style={[styles.reticleBracket, styles.bracketTL, { borderColor: getGuideColor() }]} />
+            <View style={[styles.reticleBracket, styles.bracketTR, { borderColor: getGuideColor() }]} />
+            <View style={[styles.reticleBracket, styles.bracketBL, { borderColor: getGuideColor() }]} />
+            <View style={[styles.reticleBracket, styles.bracketBR, { borderColor: getGuideColor() }]} />
+          </View>
+        )}
+
+        {/* Real-time Quality Metrics HUD */}
+        <View style={styles.hudCard}>
+          <Text style={styles.hudTitle}>BIOMETRIC QUALITY ASSURANCE</Text>
+          <View style={styles.hudGrid}>
+            <View style={styles.hudRow}>
+              <Text style={styles.hudLabel}>Face Detected:</Text>
+              <Text style={[styles.hudValue, faceDetected ? styles.hudGreen : styles.hudRed]}>
+                {faceDetected ? '🟢 DETECTED' : '🔴 SEARCHING...'}
+              </Text>
+            </View>
+            <View style={styles.hudRow}>
+              <Text style={styles.hudLabel}>Lighting Quality:</Text>
+              <Text style={[styles.hudValue, lightingStatus === 'Good' ? styles.hudGreen : styles.hudYellow]}>
+                {lightingStatus === 'Good' ? '🟢 GOOD' : lightingStatus === 'Low Light' ? '🟡 LOW LIGHT (AUTO)' : '🔴 OVEREXPOSED'}
+              </Text>
+            </View>
+            <View style={styles.hudRow}>
+              <Text style={styles.hudLabel}>Sharpness Score:</Text>
+              <Text style={[styles.hudValue, blurStatus === 'Sharp' ? styles.hudGreen : styles.hudRed]}>
+                {blurStatus === 'Sharp' ? `🟢 SHARP (${blurScore.toFixed(0)})` : `🔴 BLURRY (${blurScore.toFixed(0)})`}
+              </Text>
+            </View>
+            <View style={styles.hudRow}>
+              <Text style={styles.hudLabel}>Pose Bin:</Text>
+              <Text style={[styles.hudValue, faceDetected ? styles.hudGreen : styles.hudRed]}>
+                {faceDetected ? `🟢 ${poseDetected.toUpperCase()}` : '🔴 NONE'}
               </Text>
             </View>
           </View>
-        )}
+        </View>
 
-        {alignmentState === 'multiple' && (
-          <View
-            style={[
-              styles.faceBoundingBox,
-              styles.multipleFaceBox,
-              {
-                left: ovalCenterX + 30,
-                top: ovalCenterY - 110,
-              },
-            ]}
-          >
-            <View style={[styles.labelTag, styles.dangerLabelTag]}>
-              <Text style={styles.labelText}>FACE SCANNING</Text>
-            </View>
-          </View>
-        )}
-
+        {/* Status Indicator Banner */}
         <View style={styles.bannerContainer}>
-          <View style={[styles.banner, { borderColor: getBorderColor() }]}>
-            <View style={[styles.bannerDot, { backgroundColor: getBorderColor() }]} />
-            <Text style={[styles.bannerText, { color: getBorderColor() }]}>
+          <View style={[styles.banner, { borderColor: getGuideColor() }]}>
+            <View style={[styles.bannerDot, { backgroundColor: getGuideColor() }]} />
+            <Text style={[styles.bannerText, { color: getGuideColor() }]}>
               {getStatusText()}
             </Text>
           </View>
@@ -269,6 +399,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0A0A0A',
     overflow: 'hidden',
+  },
+  fullscreenCamera: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: '100%',
+    height: '100%',
   },
   cameraMock: {
     ...StyleSheet.absoluteFill,
@@ -301,105 +438,116 @@ const styles = StyleSheet.create({
   overlayContainer: {
     ...StyleSheet.absoluteFill,
   },
-  ovalGuide: {
+  scannerOuterContainer: {
     position: 'absolute',
-    borderRadius: 999,
-    borderWidth: 2.5,
-    borderStyle: 'dashed',
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 30,
   },
-  scanningLine: {
+  radarRing: {
     position: 'absolute',
-    left: 10,
-    right: 10,
-    height: 2,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 5,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderStyle: 'dashed',
+    backgroundColor: 'transparent',
   },
-  reticleCorner: {
+  radarCircle: {
     position: 'absolute',
-    width: 16,
-    height: 16,
-  },
-  topLeft: {
-    top: 30,
-    left: 30,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
-  },
-  topRight: {
-    top: 30,
-    right: 30,
-    borderTopWidth: 2,
-    borderRightWidth: 2,
-  },
-  bottomLeft: {
-    bottom: 30,
-    left: 30,
-    borderBottomWidth: 2,
-    borderLeftWidth: 2,
-  },
-  bottomRight: {
-    bottom: 30,
-    right: 30,
-    borderBottomWidth: 2,
-    borderRightWidth: 2,
-  },
-  faceBoundingBox: {
-    position: 'absolute',
+    borderRadius: 999,
     borderWidth: 1.5,
-    borderStyle: 'solid',
-    backgroundColor: 'rgba(255, 255, 255, 0.01)',
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
   },
-  boxBracket: {
+  faceReticle: {
     position: 'absolute',
-    width: 10,
-    height: 10,
+    borderWidth: 1,
+    borderStyle: 'solid',
+    backgroundColor: 'rgba(255, 255, 255, 0.02)',
+  },
+  reticleBracket: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
   },
   bracketTL: {
     top: -1,
     left: -1,
-    borderTopWidth: 2,
-    borderLeftWidth: 2,
+    borderTopWidth: 2.5,
+    borderLeftWidth: 2.5,
   },
   bracketTR: {
     top: -1,
     right: -1,
-    borderTopWidth: 2,
-    borderRightWidth: 2,
+    borderTopWidth: 2.5,
+    borderRightWidth: 2.5,
   },
   bracketBL: {
     bottom: -1,
     left: -1,
-    borderBottomWidth: 2,
-    borderLeftWidth: 2,
+    borderBottomWidth: 2.5,
+    borderLeftWidth: 2.5,
   },
   bracketBR: {
     bottom: -1,
     right: -1,
-    borderBottomWidth: 2,
-    borderRightWidth: 2,
+    borderBottomWidth: 2.5,
+    borderRightWidth: 2.5,
   },
-  labelTag: {
+  hudCard: {
     position: 'absolute',
-    top: -18,
-    left: -1,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 2,
+    top: 100,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(18, 18, 18, 0.85)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 6,
   },
-  labelText: {
-    color: '#0A0A0A',
-    fontSize: 9,
-    fontWeight: '800',
+  hudTitle: {
     fontFamily: 'System',
+    color: '#00E5FF',
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  hudGrid: {
+    flexDirection: 'column',
+  },
+  hudRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginVertical: 3,
+  },
+  hudLabel: {
+    color: '#A0A0A0',
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  hudValue: {
+    fontFamily: 'System',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  hudGreen: {
+    color: '#00FF88',
+  },
+  hudRed: {
+    color: '#FF3B3B',
+  },
+  hudYellow: {
+    color: '#FFD600',
   },
   bannerContainer: {
     position: 'absolute',
@@ -430,17 +578,9 @@ const styles = StyleSheet.create({
   },
   bannerText: {
     fontFamily: 'System',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 1,
-  },
-  multipleFaceBox: {
-    width: 80,
-    height: 100,
-    borderColor: '#FF3B3B',
-  },
-  dangerLabelTag: {
-    backgroundColor: '#FF3B3B',
   },
 });
