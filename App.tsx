@@ -4,7 +4,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AppNavigator } from './src/navigation/AppNavigator';
 import { initDatabase } from './src/modules/database';
-import { modelLoader } from './src/modules/recognition/ModelLoader';
+import { modelManager } from './src/modules/recognition';
 import { syncEngine } from './src/modules/sync/SyncEngine';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { ToastContainer, setGlobalToastRef } from './src/components/Toast';
@@ -21,10 +21,9 @@ function App() {
         // Step 1: Initialize secure SQLite database & KeyManager
         setLoadingStatus('Initializing secure database...');
         await initDatabase();
-
         // Step 2: Initialize TFLite model (MobileFaceNet)
         setLoadingStatus('Loading face recognition models...');
-        await modelLoader.loadModel();
+        await modelManager.loadModel();
 
         // Step 3: Run connectivity check & start background sync interval
         setLoadingStatus('Starting background synchronization...');

@@ -2,6 +2,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { storage } from '../../store'; // MMKV instance
 import { Logger } from '../../utils/logger';
+import { deviceProvisioner } from './DeviceProvisioner';
 
 const BASE_URL = 'https://fnjzuczhef.execute-api.ap-south-1.amazonaws.com/prod';
 const MODULE = 'AWSClient';
@@ -58,8 +59,8 @@ class AWSClient {
       code = error.response.status;
       message = error.response.data?.message || error.response.statusText || message;
       
-      // 401 & 403 authentication codes are non-retryable
-      if (code === 401 || code === 403) {
+      // 403 authentication codes are non-retryable; 401 will be retried with fresh token
+      if (code === 403) {
         retryable = false;
       }
     } else if (error.request) {
@@ -110,7 +111,7 @@ class AWSClient {
 
   async pushAuthLogs(logs: any[]): Promise<void> {
     const token = await this.authenticateDevice();
-    const partition = storage.getString('partition') || 'DEFAULT';
+    const partition = deviceProvisioner.getProvisioningData().partition || 'DEFAULT';
 
     // Add partition to each log
     const logsWithPartition = logs.map(log => ({ ...log, partition }));
@@ -149,6 +150,28 @@ class AWSClient {
 
       Logger.info(MODULE, 'Queue item pushed successfully');
     } catch (error: any) {
+      // On 401, clear token and retry exactly once with fresh credentials
+      if (error.response && error.response.status === 401) {
+        Logger.warn(MODULE, '401 received on pushQueueItem — refreshing token and retrying...');
+        this.cachedToken = null;
+        this.tokenExpiry = 0;
+        const freshToken = await this.authenticateDevice();
+
+        try {
+          await this.client.post('/push-sync-queue', {
+            action: item.action,
+            payload: typeof item.payload === 'string'
+              ? JSON.parse(item.payload)
+              : item.payload,
+          }, {
+            headers: { Authorization: `Bearer ${freshToken}` },
+          });
+          Logger.info(MODULE, 'Queue item pushed successfully after token refresh');
+          return;
+        } catch (retryError: any) {
+          this.handleAxiosError(retryError, '/push-sync-queue (retry)');
+        }
+      }
       this.handleAxiosError(error, '/push-sync-queue');
     }
   }
@@ -169,6 +192,24 @@ class AWSClient {
       Logger.info(MODULE, `Pulled ${response.data.count} users`);
       return response.data.users || [];
     } catch (error: any) {
+      // On 401, clear token and retry exactly once
+      if (error.response && error.response.status === 401) {
+        Logger.warn(MODULE, '401 received on pullUpdatedUsers — refreshing token and retrying...');
+        this.cachedToken = null;
+        this.tokenExpiry = 0;
+        const freshToken = await this.authenticateDevice();
+
+        try {
+          const retryResponse = await this.client.get('/pull-users', {
+            headers: { Authorization: `Bearer ${freshToken}` },
+            params: { partition, since },
+          });
+          Logger.info(MODULE, `Pulled ${retryResponse.data.count} users after token refresh`);
+          return retryResponse.data.users || [];
+        } catch (retryError: any) {
+          this.handleAxiosError(retryError, '/pull-users (retry)');
+        }
+      }
       this.handleAxiosError(error, '/pull-users');
     }
   }

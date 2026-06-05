@@ -29,15 +29,53 @@ export const Toast = {
 /**
  * ToastContainer renders at the absolute root of the App tree.
  * Intercepts show commands and executes spring slide-down overlays.
+ * 
+ * Queue policy: max 2 total (1 showing + 1 queued).
+ * If a 3rd toast arrives while the queue is full, the oldest queued toast is dropped.
  */
 export const ToastContainer = forwardRef((_props, ref) => {
   const [visible, setVisible] = useState(false);
   const [config, setConfig] = useState<ToastConfig | null>(null);
-  
+
   const slideAnim = useRef(new Animated.Value(-150)).current;
   const timeoutRef = useRef<any>(null);
+  const queueRef = useRef<ToastConfig[]>([]);
+  const isShowingRef = useRef(false);
 
-  const hide = useCallback(() => {
+  const showNext = useCallback(() => {
+    if (queueRef.current.length === 0) {
+      isShowingRef.current = false;
+      return;
+    }
+
+    const nextConfig = queueRef.current.shift()!;
+    isShowingRef.current = true;
+
+    setConfig(nextConfig);
+    setVisible(true);
+
+    // Slide in spring animation
+    Animated.spring(slideAnim, {
+      toValue: 0,
+      tension: 40,
+      friction: 8,
+      useNativeDriver: true,
+    }).start();
+
+    const duration = nextConfig.durationMs || 3000;
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    timeoutRef.current = setTimeout(() => {
+      hideAndAdvance();
+    }, duration);
+  }, [slideAnim]);
+
+  const hideAndAdvance = useCallback(() => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
     Animated.timing(slideAnim, {
       toValue: -150,
       duration: 250,
@@ -45,30 +83,29 @@ export const ToastContainer = forwardRef((_props, ref) => {
     }).start(() => {
       setVisible(false);
       setConfig(null);
+      // Show next queued toast if any
+      showNext();
     });
-  }, [slideAnim]);
+  }, [slideAnim, showNext]);
+
+  const hide = useCallback(() => {
+    hideAndAdvance();
+  }, [hideAndAdvance]);
 
   useImperativeHandle(ref, () => ({
     show: (newConfig: ToastConfig) => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
+      // Queue policy: max 2 total (1 showing + 1 queued)
+      if (isShowingRef.current) {
+        // If the queue already has 1 item, drop the oldest to make room
+        if (queueRef.current.length >= 1) {
+          queueRef.current.shift();
+        }
+        queueRef.current.push(newConfig);
+      } else {
+        // Nothing showing — show immediately
+        queueRef.current.push(newConfig);
+        showNext();
       }
-
-      setConfig(newConfig);
-      setVisible(true);
-
-      // Slide in spring animation
-      Animated.spring(slideAnim, {
-        toValue: 0,
-        tension: 40,
-        friction: 8,
-        useNativeDriver: true,
-      }).start();
-
-      const duration = newConfig.durationMs || 3000;
-      timeoutRef.current = setTimeout(() => {
-        hide();
-      }, duration);
     },
     hide,
   }));

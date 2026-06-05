@@ -8,6 +8,7 @@ import { AuthStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { storage } from '../store';
 import { syncQueueRepository, purgeManager, userRepository } from '../modules/database';
+import { deviceProvisioner } from '../modules/sync/DeviceProvisioner';
 import { syncEngine, SyncReport } from '../modules/sync/SyncEngine';
 import { connectivityMonitor } from '../modules/sync/ConnectivityMonitor';
 import { formatRelativeTime, formatDuration } from '../utils/formatters';
@@ -61,7 +62,7 @@ export function AdminDashboardScreen({ navigation }: Props) {
       setDlqItems(deadQueue);
 
       // 5. Total Enrolled Users locally
-      const partition = storage.getString('partition') || 'AFR-E-02';
+      const partition = deviceProvisioner.getProvisioningData().partition || 'AFR-E-02';
       const users = await userRepository.getUsersByPartition(partition);
       setEnrolledCount(users.length);
     } catch (err) {

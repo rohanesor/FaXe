@@ -170,7 +170,19 @@ class SyncEngine {
 
         for (const item of relevantItems) {
           try {
-            await awsClient.pushQueueItem(item);
+            // Safe payload parsing: handle both string and object payloads
+            let parsedItem = { ...item };
+            if (typeof item.payload === 'string') {
+              try {
+                parsedItem.payload = JSON.parse(item.payload);
+              } catch (parseError) {
+                Logger.error('SyncEngine', `Failed to parse payload JSON for queue item ${item.id}. Skipping.`, parseError);
+                await syncQueueRepository.markFailed(item.id);
+                continue;
+              }
+            }
+
+            await awsClient.pushQueueItem(parsedItem);
             await syncQueueRepository.delete(item.id);
             report.pushedEnrollments++;
           } catch (itemError: any) {

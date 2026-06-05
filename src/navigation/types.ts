@@ -13,5 +13,4 @@ export type MainStackParamList = {
   Settings: undefined;
   Provisioning: undefined;
   MetricsDashboard: undefined;
-  DemoMode: undefined;
 };

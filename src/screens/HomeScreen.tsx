@@ -6,6 +6,7 @@ import { useIsFocused } from '@react-navigation/native';
 import { MainStackParamList } from '../navigation/types';
 import { Button } from '../components/Button';
 import { storage } from '../store';
+import { deviceProvisioner } from '../modules/sync/DeviceProvisioner';
 import { userRepository, syncQueueRepository, authLogRepository } from '../modules/database';
 import { SkeletonLoader } from '../components/SkeletonLoader';
 import { AuthLog } from '../types';
@@ -26,7 +27,7 @@ export function HomeScreen({ navigation }: Props) {
       const loadStats = async () => {
         setIsLoading(true);
         try {
-          const cachedPartition = storage.getString('partition') || 'AFR-E-02';
+          const cachedPartition = deviceProvisioner.getProvisioningData().partition || 'AFR-E-02';
           setPartition(cachedPartition);
 
           // Retrieve dynamic enrolled count for this partition

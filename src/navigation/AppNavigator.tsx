@@ -15,7 +15,6 @@ import { ResultScreen } from '../screens/ResultScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
 import { ProvisioningScreen } from '../screens/ProvisioningScreen';
 import { MetricsDashboardScreen } from '../screens/MetricsDashboardScreen';
-import { DemoModeScreen } from '../screens/DemoModeScreen';
 
 const AuthStack = createStackNavigator<AuthStackParamList>();
 const MainStack = createStackNavigator<MainStackParamList>();
@@ -38,7 +37,6 @@ function MainNavigator() {
       <MainStack.Screen name="Result" component={ResultScreen} />
       <MainStack.Screen name="Settings" component={SettingsScreen} />
       <MainStack.Screen name="MetricsDashboard" component={MetricsDashboardScreen} />
-      <MainStack.Screen name="DemoMode" component={DemoModeScreen} />
     </MainStack.Navigator>
   );
 }
@@ -68,7 +66,6 @@ export function AppNavigator() {
         <MainStack.Screen name="Result" component={ResultScreen} />
         <MainStack.Screen name="Settings" component={SettingsScreen} />
         <MainStack.Screen name="MetricsDashboard" component={MetricsDashboardScreen} />
-        <MainStack.Screen name="DemoMode" component={DemoModeScreen} />
       </MainStack.Navigator>
     );
   }

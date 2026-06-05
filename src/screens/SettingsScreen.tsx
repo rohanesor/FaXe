@@ -8,6 +8,9 @@ import {
   TextInput,
   Switch,
   Pressable,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
@@ -29,6 +32,11 @@ import { formatDuration, formatRelativeTime } from '../utils/formatters';
 import { Logger } from '../utils/logger';
 import { Toast } from '../components/Toast';
 
+// Enable LayoutAnimation on Android
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
 type Props = StackScreenProps<MainStackParamList, 'Settings'>;
 
 export function SettingsScreen({ navigation }: Props) {
@@ -47,15 +55,10 @@ export function SettingsScreen({ navigation }: Props) {
   // Operation progress states
   const [isSyncing, setIsSyncing] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
-  const [isBenchmarking, setIsBenchmarking] = useState(false);
   const [confirmDeleteText, setConfirmDeleteText] = useState('');
 
-  const [benchmarkResults, setBenchmarkResults] = useState<{
-    totalCandidates: number;
-    positiveMatchTimeMs: number;
-    negativeMatchTimeMs: number;
-    throughputScore: number;
-  } | null>(null);
+  // Collapsible dev tools
+  const [devToolsExpanded, setDevToolsExpanded] = useState(false);
 
   const provData = deviceProvisioner.getProvisioningData();
 
@@ -64,11 +67,11 @@ export function SettingsScreen({ navigation }: Props) {
       const uCount = await userRepository.getUsersCount();
       const lCount = await authLogRepository.getLogsCount();
       const pCount = await syncQueueRepository.getPendingCount();
-      
+
       setUserCount(uCount);
       setLogCount(lCount);
       setPendingCount(pCount);
-      
+
       const offDur = connectivityMonitor.getOfflineDuration();
       setOfflineDuration(offDur);
       setIsOnline(connectivityMonitor.isOnline());
@@ -84,7 +87,6 @@ export function SettingsScreen({ navigation }: Props) {
     }
   }, [isFocused]);
 
-  // Update offline duration timer dynamically while on settings screen
   useEffect(() => {
     let interval: any;
     if (isFocused) {
@@ -96,27 +98,14 @@ export function SettingsScreen({ navigation }: Props) {
     return () => clearInterval(interval);
   }, [isFocused]);
 
-  const maskUrl = (url: string) => {
+  const truncateUrl = (url: string) => {
     if (!url) return 'Not Provisioned';
-    try {
-      const parts = url.split('://');
-      if (parts.length < 2) return '***';
-      const protocol = parts[0];
-      const domainAndPath = parts[1];
-      const domainParts = domainAndPath.split('/');
-      const domain = domainParts[0];
-      const path = domainParts.slice(1).join('/');
-      
-      let maskedDomain = domain;
-      if (domain.length > 6) {
-        maskedDomain = `${domain.slice(0, 3)}***${domain.slice(-3)}`;
-      } else {
-        maskedDomain = '***';
-      }
-      return `${protocol}://${maskedDomain}${path ? '/' + path : ''}`;
-    } catch {
-      return '***';
-    }
+    return url.length > 20 ? url.substring(0, 20) + '...' : url;
+  };
+
+  const toggleDevTools = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setDevToolsExpanded(!devToolsExpanded);
   };
 
   const handleManualSync = async () => {
@@ -170,25 +159,6 @@ export function SettingsScreen({ navigation }: Props) {
     }
   };
 
-  const handleRunBenchmark = () => {
-    setIsBenchmarking(true);
-    setTimeout(() => {
-      try {
-        const results = runRecognitionBenchmark();
-        setBenchmarkResults(results);
-        Alert.alert(
-          'Benchmark Success',
-          `Linear search across 5,000 users complete!\n\nMatch scan: ${results.positiveMatchTimeMs}ms\nMismatch scan: ${results.negativeMatchTimeMs}ms\nThroughput: ${results.throughputScore} scans/sec`
-        );
-      } catch (err: any) {
-        Logger.error('SettingsScreen', 'Benchmark run failed', err);
-        Alert.alert('Benchmark Failed', err.message || 'An unexpected error occurred.');
-      } finally {
-        setIsBenchmarking(false);
-      }
-    }, 100);
-  };
-
   const handleEnterAdminMode = () => {
     setIsAdminMode(true);
   };
@@ -199,189 +169,151 @@ export function SettingsScreen({ navigation }: Props) {
       return;
     }
 
-    try {
-      Logger.warn('SettingsScreen', 'Triggering terminal factory reset...');
-      const db = databaseManager.getDB();
-      await db.transaction(async (tx) => {
-        tx.execute('DELETE FROM users;');
-        tx.execute('DELETE FROM auth_logs;');
-        tx.execute('DELETE FROM sync_queue;');
-      });
+    Alert.alert(
+      'Confirm Factory Reset',
+      'This will permanently erase all local enrolled users, audit logs, and sync queues. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              Logger.warn('SettingsScreen', 'Triggering terminal factory reset...');
+              const db = databaseManager.getDB();
+              await db.transaction(async (tx) => {
+                tx.execute('DELETE FROM users;');
+                tx.execute('DELETE FROM auth_logs;');
+                tx.execute('DELETE FROM sync_queue;');
+              });
 
-      // Clear non-provisioning MMKV configurations
-      storage.remove('isAdminMode');
-      storage.remove('debug_mode');
-      storage.remove('last_sync');
-      storage.remove('last_sync_report');
+              storage.remove('isAdminMode');
+              storage.remove('debug_mode');
+              storage.remove('last_sync');
+              storage.remove('last_sync_report');
 
-      setConfirmDeleteText('');
-      await fetchMetrics();
+              setConfirmDeleteText('');
+              await fetchMetrics();
 
-      Toast.show({
-        message: 'Factory reset completed. Local database and parameters wiped.',
-        type: 'success',
-      });
-    } catch (err: any) {
-      Logger.error('SettingsScreen', 'Factory reset execution failed', err);
-      Alert.alert('Reset Failed', 'Could not clear data: ' + err.message);
-    }
+              Toast.show({
+                message: 'Factory reset completed. Local database and parameters wiped.',
+                type: 'success',
+              });
+            } catch (err: any) {
+              Logger.error('SettingsScreen', 'Factory reset execution failed', err);
+              Alert.alert('Reset Failed', 'Could not clear data: ' + err.message);
+            }
+          },
+        },
+      ]
+    );
   };
+
+  // ─── Row Components ─────────────────────────────────────
+  const SettingRow = ({ label, value, valueStyle }: { label: string; value: string; valueStyle?: any }) => (
+    <View style={styles.row}>
+      <Text style={styles.rowLabel}>{label}</Text>
+      <Text style={[styles.rowValue, valueStyle]} numberOfLines={1} ellipsizeMode="tail">
+        {value}
+      </Text>
+    </View>
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.scrollContainer}>
         <View style={styles.header}>
           <Text style={styles.title}>Device Settings</Text>
-          <Text style={styles.subtitle}>HARDWARE CONFIGURATION</Text>
+          <Text style={styles.subtitle}>SYSTEM CONFIGURATION</Text>
         </View>
 
-        {/* Section 1: System Parameters */}
+        {/* ─── SECTION 1: DEVICE IDENTITY ─────────────────── */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>System Parameters</Text>
-          
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Device ID</Text>
-            <Text style={styles.paramValue}>{provData.deviceId || 'Not Configured'}</Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Partition Code</Text>
-            <Text style={styles.paramValue}>{provData.partition || 'Not Configured'}</Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>AWS Base URL</Text>
-            <Text style={styles.paramValue} numberOfLines={1} ellipsizeMode="middle">
-              {maskUrl(provData.awsBaseUrl)}
-            </Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Cache Database Version</Text>
-            <Text style={styles.paramValue}>v1.12.0-sqlite</Text>
-          </View>
+          <Text style={styles.sectionLabel}>DEVICE IDENTITY</Text>
+          <SettingRow label="Device ID" value={provData.deviceId || 'Not Configured'} valueStyle={styles.monoValue} />
+          <SettingRow label="Partition Zone" value={provData.partition || 'Not Configured'} />
+          <SettingRow label="AWS Endpoint" value={truncateUrl(provData.awsBaseUrl)} valueStyle={styles.monoValue} />
+          <SettingRow label="Database Version" value="v1.12.0-sqlite" />
         </View>
 
-        {/* Section 2: Connectivity & Diagnostics */}
+        {/* ─── SECTION 2: CONNECTIVITY ────────────────────── */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>Diagnostics & Network</Text>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Network Status</Text>
-            <Text style={[styles.paramValue, isOnline ? styles.paramValueOnline : styles.paramValueOffline]}>
-              {isOnline ? 'Online' : 'Offline'}
-            </Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Offline Duration</Text>
-            <Text style={styles.paramValue}>{formatDuration(offlineDuration)}</Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Last Cloud Sync</Text>
-            <Text style={styles.paramValue}>
-              {lastSyncTime ? formatRelativeTime(lastSyncTime) : 'Never'}
-            </Text>
-          </View>
-
-          <View style={styles.paramSwitchRow}>
-            <View style={styles.switchTextContainer}>
-              <Text style={styles.paramLabel}>Developer Debug Mode</Text>
-              <Text style={styles.switchSubtext}>Enables verbose terminal tracing</Text>
-            </View>
-            <Switch
-              value={debugMode || false}
-              onValueChange={setDebugMode}
-              trackColor={{ false: '#333', true: '#00E5FF' }}
-              thumbColor={debugMode ? '#FFFFFF' : '#A0A0A0'}
-            />
-          </View>
+          <Text style={styles.sectionLabel}>CONNECTIVITY</Text>
+          <SettingRow
+            label="Network Status"
+            value={isOnline ? 'Online' : 'Offline'}
+            valueStyle={isOnline ? styles.valueOnline : styles.valueOffline}
+          />
+          <SettingRow label="Offline Duration" value={formatDuration(offlineDuration)} />
+          <SettingRow
+            label="Last Cloud Sync"
+            value={lastSyncTime ? formatRelativeTime(lastSyncTime) : 'Never'}
+          />
+          <SettingRow label="Auto-Sync Interval" value="Every 15 minutes" />
         </View>
 
-        {/* Section 3: SQLite Cache Metrics */}
+        {/* ─── SECTION 3: LOCAL STORAGE METRICS ───────────── */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>SQLite Cache Metrics</Text>
-          
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Local Users Enrolled</Text>
-            <Text style={styles.paramValue}>{userCount}</Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Biometric Auth Logs</Text>
-            <Text style={styles.paramValue}>{logCount}</Text>
-          </View>
-
-          <View style={styles.paramRow}>
-            <Text style={styles.paramLabel}>Pending Sync Transactions</Text>
-            <Text style={[styles.paramValue, pendingCount > 0 ? styles.paramValuePending : null]}>
-              {pendingCount}
-            </Text>
-          </View>
+          <Text style={styles.sectionLabel}>LOCAL STORAGE METRICS</Text>
+          <SettingRow label="Enrolled Users" value={String(userCount)} />
+          <SettingRow label="Auth Log Entries" value={String(logCount)} />
+          <SettingRow
+            label="Pending Sync Queue"
+            value={String(pendingCount)}
+            valueStyle={pendingCount > 0 ? styles.valuePending : undefined}
+          />
+          <SettingRow label="Storage Used" value={`${((userCount * 0.6 + logCount * 0.1) / 1024 * 100).toFixed(1)} KB`} />
         </View>
 
-        {/* Section 4: Performance & Navigations */}
+        {/* ─── SECTION 4: DEVELOPER TOOLS (Collapsible) ───── */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>Biometric Performance & Test</Text>
-          <Text style={styles.description}>
-            Benchmark vector comparisons, check telemetry graphics, or launch the interactive presentation deck.
-          </Text>
+          <Pressable style={styles.accordionHeader} onPress={toggleDevTools}>
+            <Text style={styles.sectionLabel}>DEVELOPER TOOLS</Text>
+            <Text style={styles.accordionChevron}>{devToolsExpanded ? '▼' : '▶'}</Text>
+          </Pressable>
 
-          {benchmarkResults && (
-            <View style={styles.benchmarkResults}>
-              <View style={styles.benchmarkRow}>
-                <Text style={styles.benchmarkLabel}>Simulated Users</Text>
-                <Text style={styles.benchmarkValue}>{benchmarkResults.totalCandidates}</Text>
+          {devToolsExpanded && (
+            <View style={styles.accordionBody}>
+              <View style={styles.switchRow}>
+                <View style={styles.switchTextContainer}>
+                  <Text style={styles.rowLabel}>Debug Mode</Text>
+                  <Text style={styles.switchSubtext}>Enables verbose terminal tracing</Text>
+                </View>
+                <Switch
+                  value={debugMode || false}
+                  onValueChange={setDebugMode}
+                  trackColor={{ false: '#333', true: '#00E5FF' }}
+                  thumbColor={debugMode ? '#FFFFFF' : '#A0A0A0'}
+                />
               </View>
-              <View style={styles.benchmarkRow}>
-                <Text style={styles.benchmarkLabel}>Match Latency</Text>
-                <Text style={styles.benchmarkValue}>{benchmarkResults.positiveMatchTimeMs} ms</Text>
-              </View>
-              <View style={styles.benchmarkRow}>
-                <Text style={styles.benchmarkLabel}>Mismatch Latency</Text>
-                <Text style={styles.benchmarkValue}>{benchmarkResults.negativeMatchTimeMs} ms</Text>
-              </View>
-              <View style={styles.benchmarkRow}>
-                <Text style={styles.benchmarkLabel}>Throughput Speed</Text>
-                <Text style={styles.benchmarkValueText}>{benchmarkResults.throughputScore} searches/s</Text>
-              </View>
+
+              <Button
+                label="View Telemetry Dashboard"
+                onPress={() => navigation.navigate('MetricsDashboard')}
+                variant="outline"
+                style={styles.devBtn}
+              />
+
+              <Button
+                label="Switch to Admin Dashboard"
+                onPress={handleEnterAdminMode}
+                variant="outline"
+                style={styles.devBtn}
+              />
             </View>
           )}
-
-          <Button
-            label={isBenchmarking ? 'Running Benchmark...' : 'Run Performance Benchmark'}
-            onPress={handleRunBenchmark}
-            disabled={isBenchmarking}
-            variant="outline"
-            style={styles.actionBtn}
-          />
-
-          <Button
-            label="View Telemetry Dashboard"
-            onPress={() => navigation.navigate('MetricsDashboard')}
-            variant="outline"
-            style={styles.actionBtn}
-          />
-
-          <Button
-            label="Run Demo Presentation"
-            onPress={() => navigation.navigate('DemoMode')}
-            variant="outline"
-            style={styles.actionBtn}
-          />
         </View>
 
-        {/* Section 5: Operation Controls */}
+        {/* ─── SECTION 5: OPERATIONS ──────────────────────── */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionHeader}>Operations</Text>
-          
+          <Text style={styles.sectionLabel}>OPERATIONS</Text>
+
           <Button
             label={isSyncing ? 'Syncing...' : 'Force Manual Sync Now'}
             onPress={handleManualSync}
             disabled={isSyncing}
             variant="outline"
-            style={styles.actionBtn}
+            style={styles.opBtn}
           />
 
           <Button
@@ -389,28 +321,22 @@ export function SettingsScreen({ navigation }: Props) {
             onPress={handleRunPurge}
             disabled={isPurging}
             variant="outline"
-            style={styles.actionBtn}
-          />
-
-          <Button
-            label="Switch to Admin Dashboard"
-            onPress={handleEnterAdminMode}
-            variant="primary"
-            style={styles.actionBtn}
+            style={styles.opBtn}
           />
         </View>
 
-        {/* Section 6: Danger Zone */}
+        {/* ─── SECTION 6: DANGER ZONE ─────────────────────── */}
         <View style={[styles.sectionCard, styles.dangerCard]}>
-          <Text style={styles.dangerHeader}>Danger Zone</Text>
+          <Text style={styles.dangerLabel}>DANGER ZONE</Text>
           <Text style={styles.dangerDescription}>
-            A factory reset clears all local enrolled users, local audit logs, and synchronization queues from the SQLite database. Configured provisioning credentials will be retained.
+            A factory reset clears all local enrolled users, local audit logs, and synchronization
+            queues from the SQLite database. Configured provisioning credentials will be retained.
           </Text>
 
           <TextInput
             style={styles.dangerInput}
             placeholder='Type "DELETE" to authorize reset'
-            placeholderTextColor="#888888"
+            placeholderTextColor="#666666"
             value={confirmDeleteText}
             onChangeText={setConfirmDeleteText}
             autoCapitalize="none"
@@ -451,7 +377,7 @@ const styles = StyleSheet.create({
     flexGrow: 1,
   },
   header: {
-    marginBottom: 24,
+    marginBottom: 28,
   },
   title: {
     fontFamily: 'System',
@@ -467,36 +393,83 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     marginTop: 2,
   },
+
+  // ─── Section Cards ──────────────────────────────────────
   sectionCard: {
-    backgroundColor: '#161616',
-    borderWidth: 1,
-    borderColor: '#222222',
-    borderRadius: 12,
+    backgroundColor: '#111111',
+    borderRadius: 8,
     padding: 16,
-    marginBottom: 20,
-  },
-  sectionHeader: {
-    fontFamily: 'System',
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#A0A0A0',
-    textTransform: 'uppercase',
     marginBottom: 16,
-    letterSpacing: 1,
   },
-  paramRow: {
+  sectionLabel: {
+    fontFamily: 'System',
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#666666',
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+    marginBottom: 12,
+  },
+
+  // ─── Rows ───────────────────────────────────────────────
+  row: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 10,
-    borderBottomWidth: 1,
+    borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#222222',
   },
-  paramSwitchRow: {
+  rowLabel: {
+    fontFamily: 'System',
+    fontSize: 14,
+    color: '#FFFFFF',
+    flex: 1,
+  },
+  rowValue: {
+    fontFamily: 'System',
+    fontSize: 14,
+    color: '#888888',
+    fontWeight: '600',
+    textAlign: 'right',
+    maxWidth: '55%',
+  },
+  monoValue: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 12,
+  },
+  valueOnline: {
+    color: '#00C853',
+  },
+  valueOffline: {
+    color: '#FF3B3B',
+  },
+  valuePending: {
+    color: '#FF9100',
+  },
+
+  // ─── Accordion (Dev Tools) ──────────────────────────────
+  accordionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  accordionChevron: {
+    color: '#666666',
+    fontSize: 12,
+    marginBottom: 12,
+  },
+  accordionBody: {
+    marginTop: 4,
+  },
+  switchRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#222222',
+    marginBottom: 10,
   },
   switchTextContainer: {
     flex: 1,
@@ -505,80 +478,33 @@ const styles = StyleSheet.create({
   switchSubtext: {
     fontFamily: 'System',
     fontSize: 11,
-    color: '#666666',
+    color: '#555555',
     marginTop: 2,
   },
-  paramLabel: {
-    fontFamily: 'System',
-    fontSize: 14,
-    color: '#A0A0A0',
+  devBtn: {
+    height: 42,
+    marginVertical: 4,
   },
-  paramValue: {
-    fontFamily: 'System',
-    fontSize: 14,
-    color: '#FFFFFF',
-    fontWeight: '600',
-    maxWidth: '65%',
-  },
-  description: {
-    fontFamily: 'System',
-    fontSize: 13,
-    color: '#888888',
-    lineHeight: 18,
-    marginBottom: 16,
-  },
-  benchmarkResults: {
-    backgroundColor: '#0A0A0A',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#222222',
-  },
-  benchmarkRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#161616',
-  },
-  benchmarkLabel: {
-    fontFamily: 'System',
-    fontSize: 13,
-    color: '#888888',
-  },
-  benchmarkValue: {
-    fontFamily: 'System',
-    fontSize: 13,
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
-  benchmarkValueText: {
-    fontFamily: 'System',
-    fontSize: 13,
-    color: '#00E5FF',
-    fontWeight: '700',
-  },
-  actionBtn: {
+
+  // ─── Operations ─────────────────────────────────────────
+  opBtn: {
     height: 46,
     marginVertical: 6,
   },
-  backBtn: {
-    marginTop: 10,
-    marginBottom: 30,
-    borderWidth: 1,
-    borderColor: '#333333',
-  },
+
+  // ─── Danger Zone ────────────────────────────────────────
   dangerCard: {
-    borderColor: 'rgba(255, 59, 59, 0.3)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 59, 59, 0.25)',
     backgroundColor: 'rgba(255, 59, 59, 0.03)',
   },
-  dangerHeader: {
+  dangerLabel: {
     fontFamily: 'System',
-    fontSize: 16,
-    fontWeight: '800',
+    fontSize: 11,
+    fontWeight: '700',
     color: '#FF3B3B',
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
     marginBottom: 8,
   },
   dangerDescription: {
@@ -616,13 +542,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
   },
-  paramValueOnline: {
-    color: '#00C853',
-  },
-  paramValueOffline: {
-    color: '#FF9100',
-  },
-  paramValuePending: {
-    color: '#FF9100',
+
+  // ─── Back Button ────────────────────────────────────────
+  backBtn: {
+    marginTop: 10,
+    marginBottom: 30,
+    borderWidth: 1,
+    borderColor: '#333333',
   },
 });

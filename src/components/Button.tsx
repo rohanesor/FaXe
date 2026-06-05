@@ -1,36 +1,37 @@
 import React from 'react';
-import { Pressable, Text, StyleSheet, StyleProp, ViewStyle } from 'react-native';
+import { Pressable, Text, StyleSheet, StyleProp, ViewStyle, ActivityIndicator } from 'react-native';
 
 interface ButtonProps {
   label: string;
   onPress: () => void;
   disabled?: boolean;
+  loading?: boolean;
   variant?: 'primary' | 'danger' | 'success' | 'outline';
   style?: StyleProp<ViewStyle>;
 }
 
-export function Button({ label, onPress, disabled = false, variant = 'primary', style }: ButtonProps) {
+export function Button({ label, onPress, disabled = false, loading = false, variant = 'primary', style }: ButtonProps) {
   const getVariantStyles = () => {
     switch (variant) {
       case 'danger':
         return {
-          button: [styles.buttonDanger, disabled && styles.buttonDisabled],
+          button: [styles.buttonDanger, (disabled || loading) && styles.buttonDisabled],
           text: styles.textWhite,
         };
       case 'success':
         return {
-          button: [styles.buttonSuccess, disabled && styles.buttonDisabled],
+          button: [styles.buttonSuccess, (disabled || loading) && styles.buttonDisabled],
           text: styles.textWhite,
         };
       case 'outline':
         return {
-          button: [styles.buttonOutline, disabled && styles.buttonDisabled],
+          button: [styles.buttonOutline, (disabled || loading) && styles.buttonDisabled],
           text: styles.textAccent,
         };
       case 'primary':
       default:
         return {
-          button: [styles.buttonPrimary, disabled && styles.buttonDisabled],
+          button: [styles.buttonPrimary, (disabled || loading) && styles.buttonDisabled],
           text: styles.textDark,
         };
     }
@@ -41,15 +42,19 @@ export function Button({ label, onPress, disabled = false, variant = 'primary', 
   return (
     <Pressable
       onPress={onPress}
-      disabled={disabled}
+      disabled={disabled || loading}
       style={({ pressed }) => [
         styles.buttonBase,
         ...variantBtnStyle,
         style,
-        pressed && !disabled && styles.buttonPressed,
+        pressed && !disabled && !loading && styles.buttonPressed,
       ]}
     >
-      <Text style={[styles.textBase, variantTextStyle]}>{label}</Text>
+      {loading ? (
+        <ActivityIndicator size="small" color={variant === 'primary' ? '#0A0A0A' : '#00E5FF'} />
+      ) : (
+        <Text style={[styles.textBase, variantTextStyle]}>{label}</Text>
+      )}
     </Pressable>
   );
 }

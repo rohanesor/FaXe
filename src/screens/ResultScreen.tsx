@@ -7,6 +7,7 @@ import { Button } from '../components/Button';
 import { OutcomeBadge } from '../components/OutcomeBadge';
 import { ConfidenceBar } from '../components/ConfidenceBar';
 import { storage } from '../store';
+import { deviceProvisioner } from '../modules/sync/DeviceProvisioner';
 
 type Props = StackScreenProps<MainStackParamList, 'Result'>;
 
@@ -16,7 +17,7 @@ type Props = StackScreenProps<MainStackParamList, 'Result'>;
  */
 export function ResultScreen({ route, navigation }: Props) {
   const { result } = route.params;
-  const partition = storage.getString('partition') || 'AFR-E-02';
+  const partition = deviceProvisioner.getProvisioningData().partition || 'AFR-E-02';
   const deviceId = 'DL-FACE-RN-99';
 
   // Format date helper: "Jun 3, 2026 — 14:32:05"
