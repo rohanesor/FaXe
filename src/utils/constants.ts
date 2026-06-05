@@ -1,5 +1,5 @@
 export const LIVENESS_THRESHOLD = 0.75;
-export const RECOGNITION_THRESHOLD = 0.82;
+export const RECOGNITION_THRESHOLD = 0.70;
 export const MODEL_INPUT_SIZE = 112;
 export const MAX_EMBEDDING_DISTANCE = 0.18;
 export const PURGE_DAYS_UNSYNCED_LOGS = 30;

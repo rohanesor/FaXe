@@ -9,8 +9,8 @@ import {
   Platform,
   ActivityIndicator,
   Animated,
-  Image,
   Pressable,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StackScreenProps } from '@react-navigation/stack';
@@ -19,15 +19,19 @@ import { Button } from '../components/Button';
 import { CameraView } from '../components/CameraView';
 import { StepIndicator } from '../components/StepIndicator';
 import { RolePicker } from '../components/RolePicker';
-import { LivenessChallenge } from '../components/LivenessChallenge';
-import { LivenessOrchestrator } from '../modules/liveness/LivenessOrchestrator';
-import { runLivenessCheck } from '../modules/liveness';
-import { ChallengeType, LivenessResult } from '../types/liveness';
-import { Landmark } from '../modules/liveness/LandmarkTracker';
 import { AlignedFaceFrame } from '../types/camera';
 import { EnrollmentState, EnrollmentResult } from '../types/enrollment';
-import { enrollmentManager } from '../modules/enrollment/EnrollmentManager';
-import { storage } from '../store';
+import { enrollmentService } from '../modules/enrollment/EnrollmentService';
+import { enrollmentRepository } from '../modules/database/EnrollmentRepository';
+import { wipeStoredEmbeddings } from '../modules/database/UserRepository';
+import { FaceEmbeddingService } from '../modules/recognition/FaceEmbeddingService';
+import { FaceMatcher } from '../modules/recognition/FaceMatcher';
+import { SmartFrameSelector } from '../modules/recognition/SmartFrameSelector';
+import { generateUUID } from '../utils/uuid';
+import { databaseManager } from '../modules/database/DatabaseManager';
+import { deviceProvisioner } from '../modules/sync/DeviceProvisioner';
+import { checkDuplicateName, checkDuplicateEmployeeId, updateEmbedding } from '../database/Database';
+import { cameraManager } from '../modules/camera/CameraManager';
 
 type Props = StackScreenProps<MainStackParamList, 'Enroll'>;
 
@@ -35,33 +39,172 @@ export function EnrollScreen({ navigation }: Props) {
   // UI states
   const [state, setState] = useState<EnrollmentState>('form');
   const [name, setName] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
   const [role, setRole] = useState<'worker' | 'admin' | 'visitor'>('worker');
   const [partition, setPartition] = useState('AFR-E-02');
-  const [alignedFrame, setAlignedFrame] = useState<AlignedFaceFrame | null>(null);
+  const [, setAlignedFrame] = useState<AlignedFaceFrame | null>(null);
 
-  // Active Liveness States
-  const [activeLivenessActive, setActiveLivenessActive] = useState(false);
-  const [currentChallenge, setCurrentChallenge] = useState<ChallengeType | null>(null);
-  const [challengeStatus, setChallengeStatus] = useState<'active' | 'passed' | 'failed'>('active');
-  const [progressText, setProgressText] = useState('');
   const [livenessError, setLivenessError] = useState<string | null>(null);
+
+  // Scan progress and state machine
+  const [scanProgress, setScanProgress] = useState(0);
+  const [isScanActive, setIsScanActive] = useState(true);
+  const [poseSuccessMessage, setPoseSuccessMessage] = useState<string | null>(null);
 
   // Enrollment process state
   const [enrollmentResult, setEnrollmentResult] = useState<EnrollmentResult | null>(null);
+  const [overwriteMode, setOverwriteMode] = useState(false);
+
+  // Smart frame selector
+  const frameSelector = useRef(new SmartFrameSelector()).current;
+  const startTimeRef = useRef<number | null>(null);
+  const duplicateCheckDone = useRef(false);
+  const isEnrollingRef = useRef(false);
+
+  // Real-time debounced checks
+  const [nameWarning, setNameWarning] = useState<string | null>(null);
+  const [nameSuccess, setNameSuccess] = useState<string | null>(null);
+  const [employeeIdWarning, setEmployeeIdWarning] = useState<string | null>(null);
+  const [employeeIdSuccess, setEmployeeIdSuccess] = useState<string | null>(null);
+  const [isNameChecking, setIsNameChecking] = useState(false);
+  const [isEmployeeIdChecking, setIsEmployeeIdChecking] = useState(false);
+
+  const nameDebounceTimer = useRef<any>(null);
+  const empDebounceTimer = useRef<any>(null);
 
   // Scale animation for success checkmark or error X
   const badgeScale = useRef(new Animated.Value(0)).current;
 
-  // Load partition code from MMKV on mount
+  // Request camera permission on mount
   useEffect(() => {
-    const cachedPartition = storage.getString('partition');
+    const initPermissions = async () => {
+      const hasPerm = await cameraManager.hasPermission();
+      if (!hasPerm) {
+        const granted = await cameraManager.requestPermission();
+        if (!granted) {
+          Alert.alert(
+            'Camera Access Required',
+            'Please enable camera access in settings to enroll operators.'
+          );
+          navigation.goBack();
+        }
+      }
+    };
+    initPermissions();
+  }, [navigation]);
+
+  // Load partition code on mount
+  useEffect(() => {
+    const cachedPartition = deviceProvisioner.getProvisioningData().partition;
     if (cachedPartition) {
       setPartition(cachedPartition);
     }
   }, []);
 
-  // Trigger scale animation on success/error screens
+  // Debounced Name Check
   useEffect(() => {
+    if (nameDebounceTimer.current) {
+      clearTimeout(nameDebounceTimer.current);
+    }
+
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setNameWarning(null);
+      setNameSuccess(null);
+      return;
+    }
+
+    if (trimmed.length < 2) {
+      setNameWarning('Name must be at least 2 characters');
+      setNameSuccess(null);
+      return;
+    }
+
+    if (trimmed.length > 50) {
+      setNameWarning('Name cannot exceed 50 characters');
+      setNameSuccess(null);
+      return;
+    }
+
+    const nameRegex = /^[a-zA-Z\s-]+$/;
+    if (!nameRegex.test(trimmed)) {
+      setNameWarning('Name can only contain letters, spaces, and hyphens');
+      setNameSuccess(null);
+      return;
+    }
+
+    setNameWarning(null);
+    setNameSuccess(null);
+    setIsNameChecking(true);
+
+    nameDebounceTimer.current = setTimeout(async () => {
+      try {
+        const isDuplicate = await checkDuplicateName(trimmed);
+        if (isDuplicate) {
+          setNameWarning(`⚠ '${trimmed}' is already enrolled`);
+          setNameSuccess(null);
+        } else {
+          setNameWarning(null);
+          setNameSuccess('✓ Name available');
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsNameChecking(false);
+      }
+    }, 500);
+
+    return () => {
+      if (nameDebounceTimer.current) {
+        clearTimeout(nameDebounceTimer.current);
+      }
+    };
+  }, [name]);
+
+  // Debounced Employee ID Check
+  useEffect(() => {
+    if (empDebounceTimer.current) {
+      clearTimeout(empDebounceTimer.current);
+    }
+
+    const trimmed = employeeId.trim();
+    if (!trimmed) {
+      setEmployeeIdWarning(null);
+      setEmployeeIdSuccess(null);
+      return;
+    }
+
+    setEmployeeIdWarning(null);
+    setEmployeeIdSuccess(null);
+    setIsEmployeeIdChecking(true);
+
+    empDebounceTimer.current = setTimeout(async () => {
+      try {
+        const isDuplicate = await checkDuplicateEmployeeId(trimmed);
+        if (isDuplicate) {
+          setEmployeeIdWarning('Employee ID already in use');
+          setEmployeeIdSuccess(null);
+        } else {
+          setEmployeeIdWarning(null);
+          setEmployeeIdSuccess('✓ Employee ID available');
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setIsEmployeeIdChecking(false);
+      }
+    }, 500);
+
+    return () => {
+      if (empDebounceTimer.current) {
+        clearTimeout(empDebounceTimer.current);
+      }
+    };
+  }, [employeeId]);
+
+  // Trigger scale animation on success/error screens, auto-navigate on success after 4s
+  useEffect(() => {
+    let timeoutId: any;
     if (state === 'success' || state === 'error') {
       badgeScale.setValue(0);
       Animated.spring(badgeScale, {
@@ -70,159 +213,231 @@ export function EnrollScreen({ navigation }: Props) {
         tension: 40,
         useNativeDriver: true,
       }).start();
+
+      if (state === 'success') {
+        timeoutId = setTimeout(() => {
+          navigation.navigate('Home' as any);
+        }, 4000);
+      }
     }
-  }, [state, badgeScale]);
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
+  }, [state, badgeScale, navigation]);
 
-  // Generates coordinate feeds that mimic human alignment gestures over time (same as VerifyScreen)
-  const getSimulatedLandmarksForChallenge = (challenge: ChallengeType, tick: number): Landmark[] => {
-    const baseLandmarks: Landmark[] = [
-      { x: 100, y: 100 }, // Left Eye center
-      { x: 200, y: 100 }, // Right Eye center
-      { x: 150, y: 150 }, // Nose Tip
-      { x: 110, y: 200 }, // Mouth Left
-      { x: 190, y: 200 }, // Mouth Right
-      { x: 150, y: 240 }, // Chin
-      { x: 0, y: 0.35 },  // Left Eye EAR
-      { x: 0, y: 0.35 },  // Right Eye EAR
-    ];
+  const handleFaceAligned = async (frameData: AlignedFaceFrame, yaw: number, pitch: number, blurScore?: number) => {
+    if (!isScanActive || isEnrollingRef.current) return;
 
-    switch (challenge) {
-      case ChallengeType.BLINK:
-        if (tick >= 6 && tick <= 8) {
-          baseLandmarks[6].y = 0.05;
-          baseLandmarks[7].y = 0.05;
-        }
-        break;
-      case ChallengeType.SMILE:
-        if (tick >= 6) {
-          baseLandmarks[3].x = 90;
-          baseLandmarks[4].x = 210;
-        }
-        break;
-      case ChallengeType.TURN_LEFT:
-        if (tick >= 6) {
-          baseLandmarks[2].x = 95;
-        }
-        break;
-      case ChallengeType.TURN_RIGHT:
-        if (tick >= 6) {
-          baseLandmarks[2].x = 205;
-        }
-        break;
-      case ChallengeType.NOD:
-        if (tick >= 6 && tick <= 8) {
-          baseLandmarks[2].y = 185;
-        } else if (tick >= 9) {
-          baseLandmarks[2].y = 152;
-        }
-        break;
+    // Start timer on first face detection
+    if (startTimeRef.current === null) {
+      startTimeRef.current = Date.now();
+      console.log('[EnrollScreen] Face detected. Starting 3.5s automated scan...');
     }
 
-    return baseLandmarks;
-  };
-
-  const handleFaceAligned = async (frameData: AlignedFaceFrame) => {
-    console.log('[EnrollScreen] Face aligned. Freezing frame and initiating liveness checks...');
-    setAlignedFrame(frameData);
-    setLivenessError(null);
-    setState('liveness');
-
-    // Promisified loop that simulates active challenges
-    const runActiveChecks = () => {
-      return new Promise<LivenessResult>((resolve) => {
-        const orchestrator = new LivenessOrchestrator();
-        orchestrator.startSession();
-        
-        setActiveLivenessActive(true);
-        setCurrentChallenge(orchestrator.getCurrentChallenge());
-        setChallengeStatus('active');
-        setProgressText(orchestrator.getProgressText());
-
-        let simTick = 0;
-        let landmarksTimer: any;
-
-        const feedLoop = () => {
-          const curChallenge = orchestrator.getCurrentChallenge();
-          if (!curChallenge) {
-            clearInterval(landmarksTimer);
+    // 1. Run Duplicate Face Check on the first frame to fail fast if they are already registered
+    if (!duplicateCheckDone.current && !overwriteMode) {
+      duplicateCheckDone.current = true;
+      console.log('[EnrollScreen] Checking duplicate face on initial frame...');
+      const existingEmbeddings = await enrollmentRepository.getCandidates(partition);
+      try {
+        if (existingEmbeddings.length > 0) {
+          const firstEmbedding = await FaceEmbeddingService.generateEmbedding(frameData.base64jpeg);
+          const matchResult = FaceMatcher.match(firstEmbedding, existingEmbeddings);
+          console.log('[EnrollScreen] Initial frame duplicate scan outcome:', matchResult);
+          
+          if (matchResult.matched && matchResult.confidence > 0.90) {
+            setLivenessError('This face is already enrolled under a profile in this partition.');
+            setIsScanActive(false);
+            setAlignedFrame(null);
+            wipeStoredEmbeddings(existingEmbeddings);
             return;
           }
-
-          simTick++;
-          const mockLandmarks = getSimulatedLandmarksForChallenge(curChallenge, simTick);
-          const feed = orchestrator.feedLandmarks(mockLandmarks);
-
-          if (feed.passed) {
-            setChallengeStatus('passed');
-            clearInterval(landmarksTimer);
-            
-            setTimeout(() => {
-              if (feed.completed) {
-                setActiveLivenessActive(false);
-                resolve(feed.result!);
-              } else {
-                setCurrentChallenge(orchestrator.getCurrentChallenge());
-                setChallengeStatus('active');
-                setProgressText(orchestrator.getProgressText());
-                simTick = 0;
-                landmarksTimer = setInterval(feedLoop, 200);
-              }
-            }, 1000);
-          } else if (feed.completed) {
-            clearInterval(landmarksTimer);
-            setChallengeStatus('failed');
-            
-            setTimeout(() => {
-              setActiveLivenessActive(false);
-              resolve(feed.result!);
-            }, 1000);
-          }
-        };
-
-        landmarksTimer = setInterval(feedLoop, 200);
-      });
-    };
-
-    try {
-      // Execute the liveness pipeline
-      const livenessResult = await runLivenessCheck(() => frameData, runActiveChecks);
-
-      if (livenessResult.passed) {
-        console.log('[EnrollScreen] Liveness passed! Proceeding to enrollment submission...');
-        setState('processing');
-        executeEnrollment(frameData);
-      } else {
-        console.log('[EnrollScreen] Liveness failed:', livenessResult.reason);
-        setLivenessError('Liveness verification failed. Please align again.');
-        setState('camera');
-        setAlignedFrame(null);
+        }
+      } catch (err) {
+        console.error('[EnrollScreen] Duplicate check error:', err);
+      } finally {
+        wipeStoredEmbeddings(existingEmbeddings);
       }
-    } catch (err) {
-      console.error('[EnrollScreen] Liveness runner exception:', err);
-      setLivenessError('A system error occurred during liveness.');
-      setState('camera');
-      setAlignedFrame(null);
+    }
+
+    // 2. Add frame to Smart Frame Selector
+    frameSelector.addFrame({
+      base64jpeg: frameData.base64jpeg,
+      blurScore: blurScore ?? 100,
+      yaw,
+      pitch,
+      timestamp: Date.now(),
+    });
+
+    // 3. Update scan progress based on elapsed time (up to 3.5 seconds)
+    const elapsed = Date.now() - startTimeRef.current;
+    const progress = Math.min(100, Math.round((elapsed / 3500) * 100));
+    setScanProgress(progress);
+
+    // 4. Complete scan when time is up (3.5s) or we have all 5 head orientations
+    if (elapsed >= 3500 || frameSelector.getUniqueBinCount() === 5) {
+      console.log('[EnrollScreen] Frame selection complete. Finalizing template aggregation...');
+      setIsScanActive(false);
+      isEnrollingRef.current = true;
+      setPoseSuccessMessage('Processing scans...');
+
+      // Retrieve best 5 frames representing natural head variations
+      const bestFrames = frameSelector.getBestFrames();
+      
+      // Execute template generation
+      setTimeout(() => {
+        setPoseSuccessMessage(null);
+        aggregateAndEnroll(bestFrames);
+      }, 1000);
     }
   };
 
-  const executeEnrollment = async (frame: AlignedFaceFrame) => {
+  const handleContinueToCamera = async () => {
     try {
-      const result = await enrollmentManager.enrollUser(
-        {
-          name,
-          role,
-          partition,
-        },
-        frame
-      );
+      setIsNameChecking(true);
+      const isEmpDuplicate = await checkDuplicateEmployeeId(employeeId);
+      if (isEmpDuplicate) {
+        setIsNameChecking(false);
+        Alert.alert('Error', 'Employee ID already in use');
+        return;
+      }
 
-      setEnrollmentResult(result);
-      if (result.success) {
-        setState('success');
+      const isNameDuplicate = await checkDuplicateName(name);
+      setIsNameChecking(false);
+
+      if (isNameDuplicate) {
+        Alert.alert(
+          'Already Enrolled',
+          `A person named '${name.trim()}' is already registered. Do you want to UPDATE their biometric data instead?`,
+          [
+            {
+              text: 'Cancel',
+              style: 'cancel',
+              onPress: () => {},
+            },
+            {
+              text: 'Update Existing',
+              onPress: () => {
+                setOverwriteMode(true);
+                startTimeRef.current = null;
+                duplicateCheckDone.current = false;
+                isEnrollingRef.current = false;
+                setScanProgress(0);
+                setIsScanActive(true);
+                frameSelector.reset();
+                setLivenessError(null);
+                setPoseSuccessMessage(null);
+                setState('camera');
+              },
+            },
+          ]
+        );
       } else {
-        setState('error');
+        setOverwriteMode(false);
+        startTimeRef.current = null;
+        duplicateCheckDone.current = false;
+        isEnrollingRef.current = false;
+        setScanProgress(0);
+        setIsScanActive(true);
+        frameSelector.reset();
+        setLivenessError(null);
+        setPoseSuccessMessage(null);
+        setState('camera');
       }
     } catch (err) {
+      setIsNameChecking(false);
+      console.error(err);
+    }
+  };
+
+  const aggregateAndEnroll = async (frames: { base64jpeg: string }[]) => {
+    setState('processing');
+    try {
+      if (frames.length === 0) {
+        throw new Error('NO_VALID_FRAMES: Could not extract any sharp face scans.');
+      }
+
+      // Generate embeddings for the selected best frames
+      const embeddings: Float32Array[] = [];
+      for (const f of frames) {
+        const emb = await FaceEmbeddingService.generateEmbedding(f.base64jpeg);
+        embeddings.push(emb);
+      }
+
+      // Aggregate (average) the embeddings to create a single robust template
+      // Apply 50% weight to the Front pose (index 0) and split the remaining 50% among profile poses
+      console.log('[EnrollScreen] Calculating weighted average biometric vector...');
+      const dim = embeddings[0]?.length || 192;
+      const avgEmbedding = new Float32Array(dim);
+      const numPoses = embeddings.length;
+
+      const weights = new Float32Array(numPoses);
+      if (numPoses > 1) {
+        weights[0] = 0.50; // Front pose gets 50% weight
+        const remainingWeight = 0.50 / (numPoses - 1);
+        for (let p = 1; p < numPoses; p++) {
+          weights[p] = remainingWeight;
+        }
+      } else {
+        weights[0] = 1.0;
+      }
+
+      for (let d = 0; d < dim; d++) {
+        let sum = 0;
+        for (let p = 0; p < numPoses; p++) {
+          sum += embeddings[p][d] * weights[p];
+        }
+        avgEmbedding[d] = sum;
+      }
+
+      // L2 Normalize the averaged template
+      let sumSquares = 0;
+      for (let i = 0; i < dim; i++) {
+        sumSquares += avgEmbedding[i] * avgEmbedding[i];
+      }
+      const magnitude = Math.sqrt(sumSquares);
+      if (magnitude > 0) {
+        for (let i = 0; i < dim; i++) {
+          avgEmbedding[i] /= magnitude;
+        }
+      }
+
+      const targetUserId = employeeId.trim() || generateUUID();
+      const payload = {
+        id: targetUserId,
+        name: name.trim(),
+        role: role,
+        partition: partition,
+      };
+
+      if (overwriteMode) {
+        console.log('[EnrollScreen] Overwriting template in database...');
+        await updateEmbedding(name, avgEmbedding);
+      } else {
+        console.log('[EnrollScreen] Registering new template in database...');
+        // Directly enroll the pre-calculated, weighted-averaged template
+        // This avoids running double inference by not calling enrollmentService.enrollMultiPose
+        await enrollmentRepository.enrollUser(payload, avgEmbedding);
+      }
+
+      setEnrollmentResult({
+        success: true,
+        userId: targetUserId,
+        name: name.trim(),
+        enrolledAt: Date.now(),
+        reason: null,
+        step: null,
+      });
+      
+      try {
+        databaseManager.runDiagnostic();
+      } catch (diagErr) {
+        console.warn('[EnrollScreen] Post-enrollment diagnostic failed:', diagErr);
+      }
+      setState('success');
+    } catch (err: any) {
       console.error('[EnrollScreen] Enrollment pipeline crashed:', err);
       setEnrollmentResult({
         success: false,
@@ -253,29 +468,46 @@ export function EnrollScreen({ navigation }: Props) {
   };
 
   const handleCancelCamera = () => {
+    setIsScanActive(false);
     setState('form');
     setAlignedFrame(null);
+    setScanProgress(0);
+    setLivenessError(null);
   };
 
   const resetFlow = () => {
     setName('');
+    setEmployeeId('');
     setRole('worker');
     setAlignedFrame(null);
     setEnrollmentResult(null);
+    setOverwriteMode(false);
+    setNameWarning(null);
+    setNameSuccess(null);
+    setEmployeeIdWarning(null);
+    setEmployeeIdSuccess(null);
+    setScanProgress(0);
+    setLivenessError(null);
     setState('form');
   };
 
   const retryFromState = () => {
+    setAlignedFrame(null);
+    setScanProgress(0);
+    setLivenessError(null);
     if (!enrollmentResult) {
       setState('form');
       return;
     }
     
-    // Redirect to form or camera depending on the error type
     if (enrollmentResult.reason === 'INVALID_INPUT') {
       setState('form');
     } else {
-      setAlignedFrame(null);
+      setIsScanActive(true);
+      startTimeRef.current = null;
+      duplicateCheckDone.current = false;
+      isEnrollingRef.current = false;
+      frameSelector.reset();
       setState('camera');
     }
   };
@@ -300,168 +532,187 @@ export function EnrollScreen({ navigation }: Props) {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.container}
       >
-        {/* Renders Step Dots at top */}
-        <StepIndicator currentStep={getStepIndex()} />
+        {state !== 'camera' && state !== 'liveness' && (
+          <StepIndicator currentStep={getStepIndex()} />
+        )}
 
-        <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
-          
-          {/* STATE: FORM */}
-          {state === 'form' && (
-            <View style={styles.stepContainer}>
-              <View style={styles.header}>
-                <Text style={styles.title}>Operator Details</Text>
-                <Text style={styles.subtitle}>CREATE SECURE OFFLINE PROFILE</Text>
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardHeader}>Identity Attributes</Text>
-                
-                <View style={styles.inputGroup}>
-                  <Text style={styles.label}>Full Name</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={name}
-                    onChangeText={setName}
-                    placeholder="Enter operator name"
-                    placeholderTextColor="#666666"
-                    maxLength={60}
-                  />
-                  <Text style={styles.charCount}>{name.length}/60 chars</Text>
-                </View>
-
-                <View style={styles.inputGroup}>
-                  <Text style={styles.label}>Assigned Role</Text>
-                  <RolePicker value={role} onChange={setRole} />
-                </View>
-
-                <View style={styles.inputGroup}>
-                  <Text style={styles.label}>Local Device Partition</Text>
-                  <View style={styles.readonlyPartition}>
-                    <Text style={styles.readonlyPartitionText}>{partition}</Text>
-                  </View>
-                  <Text style={styles.helperText}>Locked to offline hardware cache settings.</Text>
-                </View>
-              </View>
-
-              <Button
-                label="Continue to Camera"
-                onPress={() => setState('camera')}
-                disabled={!name.trim()}
-                style={styles.actionBtn}
-              />
-              <Button
-                label="Cancel"
-                onPress={() => navigation.goBack()}
-                variant="outline"
-                style={styles.actionBtn}
-              />
+        {state === 'camera' ? (
+          <View style={StyleSheet.absoluteFill}>
+            <CameraView
+              onFaceAligned={handleFaceAligned}
+              isActive={isScanActive}
+              isEnrollment={true}
+            />
+            
+            <View style={styles.cameraOverlayHeader}>
+              <Pressable onPress={handleCancelCamera} style={styles.cancelLink}>
+                <Text style={styles.cancelLinkText}>✕ Cancel</Text>
+              </Pressable>
+              <Text style={styles.cameraTitle}>Face ID Setup</Text>
             </View>
-          )}
 
-          {/* STATE: CAMERA */}
-          {state === 'camera' && (
-            <View style={styles.stepContainer}>
-              <View style={styles.cameraHeaderRow}>
-                <Pressable onPress={handleCancelCamera} style={styles.cancelLink}>
-                  <Text style={styles.cancelLinkText}>✕ Cancel</Text>
-                </Pressable>
-                <Text style={styles.cameraTitle}>Biometric Scan</Text>
-              </View>
-
-              <Text style={styles.cameraInstruction}>Position your face inside the center oval</Text>
+            {/* Premium Circular Scan Progress */}
+            <View style={styles.progressOverlay}>
+              <Text style={styles.progressTitle}>Position Face inside the Scanner</Text>
+              <Text style={styles.progressSubtitle}>Slowly look straight and rotate your head slightly</Text>
               
-              {livenessError && (
+              <View style={styles.progressBarContainer}>
+                <View style={[styles.progressBarFill, { width: `${scanProgress}%` }]} />
+              </View>
+              <Text style={styles.progressPercentage}>{scanProgress}% Complete</Text>
+            </View>
+
+            {poseSuccessMessage && (
+              <View style={[styles.poseLoadingOverlay, styles.poseSuccessOverlay]}>
+                <View style={styles.poseSuccessIconCircle}>
+                  <ActivityIndicator size="large" color="#00C853" />
+                </View>
+                <Text style={styles.poseSuccessText}>{poseSuccessMessage}</Text>
+              </View>
+            )}
+            
+            {livenessError && (
+              <View style={styles.errorBanner}>
                 <Text style={styles.livenessWarning}>{livenessError}</Text>
-              )}
-
-              <View style={styles.cameraContainer}>
-                <CameraView onFaceAligned={handleFaceAligned} isActive={state === 'camera'} />
+                <Button label="Retry Scan" onPress={retryFromState} variant="danger" style={styles.retryBtn} />
               </View>
-            </View>
-          )}
+            )}
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.scrollContainer} keyboardShouldPersistTaps="handled">
+            
+            {/* STATE: FORM */}
+            {state === 'form' && (
+              <View style={styles.stepContainer}>
+                <View style={styles.header}>
+                  <Text style={styles.title}>Operator Details</Text>
+                  <Text style={styles.subtitle}>CREATE SECURE OFFLINE PROFILE</Text>
+                </View>
 
-          {/* STATE: LIVENESS */}
-          {state === 'liveness' && alignedFrame && (
-            <View style={styles.stepContainer}>
-              <Text style={styles.cameraInstruction}>Liveness Verification</Text>
-              
-              <View style={styles.cameraContainer}>
-                {/* Overlay a frozen face crop matching the captured frame */}
-                <Image
-                  source={{ uri: `data:image/jpeg;base64,${alignedFrame.base64jpeg}` }}
-                  style={StyleSheet.absoluteFill}
-                  resizeMode="cover"
-                />
-                
-                {activeLivenessActive && currentChallenge && (
-                  <View style={styles.livenessOverlay}>
-                    <LivenessChallenge
-                      challenge={currentChallenge}
-                      onComplete={() => {}}
-                      status={challengeStatus}
-                      progressText={progressText}
-                      timeoutSeconds={4}
+                <View style={styles.card}>
+                  <Text style={styles.cardHeader}>Identity Attributes</Text>
+                  
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Full Name</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={name}
+                      onChangeText={setName}
+                      onBlur={() => setName(name.trim())}
+                      placeholder="Enter operator name"
+                      placeholderTextColor="#666666"
+                      maxLength={50}
                     />
+                    <View style={styles.validationRow}>
+                      {nameWarning && <Text style={styles.warningText}>{nameWarning}</Text>}
+                      {nameSuccess && <Text style={styles.successText}>{nameSuccess}</Text>}
+                      <Text style={styles.charCount}>{name.length}/50</Text>
+                    </View>
                   </View>
-                )}
-              </View>
-            </View>
-          )}
 
-          {/* STATE: PROCESSING */}
-          {state === 'processing' && (
-            <View style={styles.processingContainer}>
-              <ActivityIndicator size="large" color="#00E5FF" style={styles.processingSpinner} />
-              <Text style={styles.processingText}>Enrolling securely...</Text>
-              <Text style={styles.processingSubtext}>Encrypting biometric vectors locally</Text>
-            </View>
-          )}
-
-          {/* STATE: SUCCESS */}
-          {state === 'success' && (
-            <View style={styles.feedbackContainer}>
-              <Animated.View style={[styles.badge, styles.successBadge, { transform: [{ scale: badgeScale }] }]}>
-                <Text style={styles.badgeIcon}>✓</Text>
-              </Animated.View>
-
-              <Text style={styles.feedbackTitle}>Enrolled Successfully</Text>
-              
-              <View style={styles.profileDetailsCard}>
-                <Text style={styles.profileName}>{name.trim()}</Text>
-                
-                <View style={styles.badgeRow}>
-                  <View style={styles.roleBadge}>
-                    <Text style={styles.roleBadgeText}>{role}</Text>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Employee ID</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={employeeId}
+                      onChangeText={(val) => setEmployeeId(val.toUpperCase())}
+                      placeholder="e.g. EMP001"
+                      placeholderTextColor="#666666"
+                      maxLength={20}
+                      autoCapitalize="characters"
+                    />
+                    <View style={styles.validationRow}>
+                      {employeeIdWarning && <Text style={styles.warningText}>{employeeIdWarning}</Text>}
+                      {employeeIdSuccess && <Text style={styles.successText}>{employeeIdSuccess}</Text>}
+                    </View>
                   </View>
-                  <View style={styles.partitionBadge}>
-                    <Text style={styles.partitionBadgeText}>{partition}</Text>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Assigned Role</Text>
+                    <RolePicker value={role} onChange={setRole} />
+                  </View>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>Local Device Partition</Text>
+                    <View style={styles.readonlyPartition}>
+                      <Text style={styles.readonlyPartitionText}>{partition}</Text>
+                    </View>
+                    <Text style={styles.helperText}>Locked to offline hardware cache settings.</Text>
                   </View>
                 </View>
-                
-                <Text style={styles.profileIdText}>ID: {enrollmentResult?.userId}</Text>
+
+                <Button
+                  label="Continue to Camera"
+                  onPress={handleContinueToCamera}
+                  disabled={!nameSuccess || !employeeIdSuccess || !!nameWarning || !!employeeIdWarning || isNameChecking || isEmployeeIdChecking}
+                  loading={isNameChecking || isEmployeeIdChecking}
+                  style={styles.actionBtn}
+                />
+                <Button
+                  label="Cancel"
+                  onPress={() => navigation.goBack()}
+                  variant="outline"
+                  style={styles.actionBtn}
+                />
               </View>
+            )}
 
-              <Button label="Enroll Another" onPress={resetFlow} style={styles.actionBtn} />
-              <Button label="Go Home" onPress={() => navigation.goBack()} variant="outline" style={styles.actionBtn} />
-            </View>
-          )}
+            {/* STATE: PROCESSING */}
+            {state === 'processing' && (
+              <View style={styles.processingContainer}>
+                <ActivityIndicator size="large" color="#00E5FF" style={styles.processingSpinner} />
+                <Text style={styles.processingText}>Enrolling securely...</Text>
+                <Text style={styles.processingSubtext}>Encrypting biometric vectors locally</Text>
+              </View>
+            )}
 
-          {/* STATE: ERROR */}
-          {state === 'error' && (
-            <View style={styles.feedbackContainer}>
-              <Animated.View style={[styles.badge, styles.errorBadge, { transform: [{ scale: badgeScale }] }]}>
-                <Text style={styles.badgeIcon}>✕</Text>
-              </Animated.View>
+            {/* STATE: SUCCESS */}
+            {state === 'success' && (
+              <View style={styles.feedbackContainer}>
+                <Animated.View style={[styles.badge, styles.successBadge, { transform: [{ scale: badgeScale }], opacity: badgeScale.interpolate({ inputRange: [0, 1], outputRange: [0, 1] }) }]}>
+                  <Text style={styles.badgeIcon}>✓</Text>
+                </Animated.View>
 
-              <Text style={styles.feedbackTitle}>Enrollment Failed</Text>
-              <Text style={styles.errorDescription}>{getErrorMessage()}</Text>
+                <Text style={styles.feedbackTitle}>Enrolled Successfully</Text>
+                
+                <View style={styles.profileDetailsCard}>
+                  <Text style={styles.profileName}>{name.trim()}</Text>
+                  
+                  <View style={styles.badgeRow}>
+                    <View style={styles.roleBadge}>
+                      <Text style={styles.roleBadgeText}>{role}</Text>
+                    </View>
+                    <View style={styles.partitionBadge}>
+                      <Text style={styles.partitionBadgeText}>{partition}</Text>
+                    </View>
+                  </View>
+                  
+                  <Text style={styles.profileIdText}>Employee ID: {enrollmentResult?.userId || employeeId.trim()}</Text>
+                  <Text style={styles.timestampText}>Registered: {new Date(enrollmentResult?.enrolledAt || Date.now()).toLocaleString()}</Text>
+                </View>
 
-              <Button label="Try Again" onPress={retryFromState} style={styles.actionBtn} />
-              <Button label="Cancel & Go Back" onPress={resetFlow} variant="outline" style={styles.actionBtn} />
-            </View>
-          )}
+                <Button label="Enroll Another" onPress={resetFlow} style={styles.actionBtn} />
+                <Button label="Go to Dashboard" onPress={() => navigation.navigate('Home' as any)} variant="outline" style={styles.actionBtn} />
+              </View>
+            )}
 
-        </ScrollView>
+            {/* STATE: ERROR */}
+            {state === 'error' && (
+              <View style={styles.feedbackContainer}>
+                <Animated.View style={[styles.badge, styles.errorBadge, { transform: [{ scale: badgeScale }] }]}>
+                  <Text style={styles.badgeIcon}>✕</Text>
+                </Animated.View>
+
+                <Text style={styles.feedbackTitle}>Enrollment Failed</Text>
+                <Text style={styles.errorDescription}>{getErrorMessage()}</Text>
+
+                <Button label="Try Again" onPress={retryFromState} style={styles.actionBtn} />
+                <Button label="Cancel & Go Back" onPress={resetFlow} variant="outline" style={styles.actionBtn} />
+              </View>
+            )}
+
+          </ScrollView>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -568,10 +819,14 @@ const styles = StyleSheet.create({
     marginVertical: 6,
     height: 46,
   },
-  cameraHeaderRow: {
+  cameraOverlayHeader: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 20 : 16,
+    left: 20,
+    right: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    zIndex: 10,
   },
   cancelLink: {
     paddingVertical: 8,
@@ -593,35 +848,74 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     marginLeft: 16,
   },
-  cameraInstruction: {
-    fontFamily: 'System',
-    fontSize: 15,
-    color: '#A0A0A0',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  cameraContainer: {
-    height: 340,
-    borderRadius: 16,
-    overflow: 'hidden',
+  progressOverlay: {
+    position: 'absolute',
+    bottom: 150,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(10, 10, 10, 0.85)',
     borderWidth: 1,
-    borderColor: '#222222',
-    backgroundColor: '#0F0F0F',
-    marginBottom: 20,
-    position: 'relative',
+    borderColor: '#333333',
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+  progressTitle: {
+    fontFamily: 'System',
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  progressSubtitle: {
+    fontFamily: 'System',
+    color: '#888888',
+    fontSize: 11,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  progressBarContainer: {
+    width: '100%',
+    height: 6,
+    backgroundColor: '#222222',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#00FF88',
+  },
+  progressPercentage: {
+    fontFamily: 'System',
+    color: '#00FF88',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  errorBanner: {
+    position: 'absolute',
+    bottom: 120,
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(10, 10, 10, 0.95)',
+    borderColor: '#FF3B3B',
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    zIndex: 25,
   },
   livenessWarning: {
     color: '#FF3B3B',
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '700',
     textAlign: 'center',
     marginBottom: 12,
   },
-  livenessOverlay: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(10, 10, 10, 0.4)',
-    justifyContent: 'center',
-    alignItems: 'center',
+  retryBtn: {
+    height: 36,
+    width: 120,
   },
   processingContainer: {
     flex: 1,
@@ -726,6 +1020,13 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: 'Courier',
     color: '#666666',
+    marginBottom: 4,
+  },
+  timestampText: {
+    fontSize: 11,
+    color: '#888888',
+    marginTop: 4,
+    fontFamily: 'System',
   },
   errorDescription: {
     fontFamily: 'System',
@@ -735,5 +1036,46 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 32,
     paddingHorizontal: 16,
+  },
+  validationRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  warningText: {
+    color: '#FF3B3B',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  successText: {
+    color: '#00C853',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  poseLoadingOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(10, 10, 10, 0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 20,
+  },
+  poseSuccessOverlay: {
+    backgroundColor: 'rgba(0, 200, 83, 0.9)',
+  },
+  poseSuccessIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#FFFFFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  poseSuccessText: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    textAlign: 'center',
   },
 });
