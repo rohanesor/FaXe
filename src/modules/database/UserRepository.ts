@@ -1,7 +1,7 @@
 import { databaseManager } from './DatabaseManager';
 import { syncQueueRepository } from './SyncQueueRepository';
 import { encryptField, decryptField } from '../encryption/FieldCipher';
-import { encrypt, decrypt } from '../encryption/EmbeddingCipher';
+import { encrypt, decrypt, safeDecrypt } from '../encryption/EmbeddingCipher';
 import { serializeEmbedding } from '../recognition/EmbeddingSerializer';
 import { StoredEmbedding } from '../../types/recognition';
 import { EnrollmentInput, StoredUser } from '../../types/database';
@@ -53,13 +53,19 @@ class UserRepository {
       const encryptedRole = encryptField(user.role);
 
       // B. Encrypt biometric embedding
-      // Convert Float32Array to 512-byte Uint8Array
+      // Convert Float32Array to Uint8Array (512-byte or 768-byte)
       const serializedVector = serializeEmbedding(user.embedding);
-      // Encrypt vector with AES-256-GCM (returns 540-byte blob)
+      // Encrypt vector with AES-256-GCM (returns 540-byte or 796-byte blob)
       const encryptedVectorBlob = await encrypt(user.userId, serializedVector);
 
       // C. Perform local SQLite database write inside a transaction
       await db.transaction(async (tx) => {
+        // Convert Uint8Array to ArrayBuffer for react-native-quick-sqlite BLOB compatibility
+        const binaryBuffer = encryptedVectorBlob.buffer.slice(
+          encryptedVectorBlob.byteOffset,
+          encryptedVectorBlob.byteOffset + encryptedVectorBlob.byteLength
+        );
+
         tx.execute(
           `INSERT INTO users (
             id, name_encrypted, role_encrypted, partition, embedding_blob, enrolled_at, last_seen, sync_status
@@ -69,7 +75,7 @@ class UserRepository {
             encryptedName,
             encryptedRole,
             user.partition,
-            encryptedVectorBlob,
+            binaryBuffer,
             enrolledTime,
             enrolledTime, // initial last_seen is same as enrolled_at
           ]
@@ -141,6 +147,9 @@ class UserRepository {
    * Retrieves and decrypts the face embeddings of all users in a partition.
    * Used for linear scanning during identity verification.
    * NOTE: Callers must call wipeStoredEmbeddings() on the returned array immediately after matching.
+   *
+   * Production-safe: each embedding is decrypted individually inside its own try/catch.
+   * A single corrupt or legacy blob will NOT kill the entire function.
    */
   public async getEmbeddingsForPartition(partition: string): Promise<StoredEmbedding[]> {
     const db = databaseManager.getDB();
@@ -148,25 +157,83 @@ class UserRepository {
 
     try {
       const result = db.execute(
-        'SELECT id, embedding_blob, enrolled_at FROM users WHERE partition = ?;',
-        [partition]
+        'SELECT id, embedding_blob, enrolled_at FROM users WHERE partition = ? AND sync_status != ?;',
+        [partition, 'deleted']
       );
 
-      const len = result.rows?.length ?? 0;
-      
-      for (let i = 0; i < len; i++) {
+      const totalCandidates = result.rows?.length ?? 0;
+      console.log(`[UserRepository] Fetched ${totalCandidates} raw rows from SQLite for partition '${partition}'`);
+
+      if (totalCandidates === 0) return [];
+
+      let decryptedCount = 0;
+      let skippedCount = 0;
+
+      for (let i = 0; i < totalCandidates; i++) {
         const row = result.rows?.item(i);
-        const encryptedBlob = row.embedding_blob; // Uint8Array returned from DB blob
+        try {
+          const encryptedBlob = row.embedding_blob;
 
-        // Decrypt AES-256-GCM embedding blob (returns 512-byte Uint8Array)
-        const decryptedVector = await decrypt(row.id, encryptedBlob);
+          // Skip null or empty blobs silently
+          if (!encryptedBlob || encryptedBlob.length === 0) {
+            console.warn(`[UserRepository] Skipping user ${row.id}: embedding_blob is null or empty.`);
+            skippedCount++;
+            continue;
+          }
 
-        storedEmbeddings.push({
-          userId: row.id,
-          embeddingBlob: decryptedVector,
-          enrolledAt: new Date(row.enrolled_at).toISOString(),
-        });
+          // Convert to Uint8Array if needed (SQLite may return ArrayBuffer)
+          let blobArray: Uint8Array;
+          if (encryptedBlob instanceof Uint8Array) {
+            blobArray = encryptedBlob;
+          } else if (encryptedBlob instanceof ArrayBuffer) {
+            blobArray = new Uint8Array(encryptedBlob);
+          } else if (typeof encryptedBlob === 'string') {
+            // Base64 string from SQLite — decode it
+            const binaryStr = (globalThis as any).atob(encryptedBlob);
+            blobArray = new Uint8Array(binaryStr.length);
+            for (let j = 0; j < binaryStr.length; j++) {
+              blobArray[j] = binaryStr.charCodeAt(j);
+            }
+          } else {
+            console.warn(`[UserRepository] Skipping user ${row.id}: unexpected blob type ${typeof encryptedBlob}`);
+            skippedCount++;
+            continue;
+          }
+
+          console.log(`[UserRepository] Decrypting embedding for user ${row.id} (blob size: ${blobArray.length} bytes)`);
+
+          // Attempt safe decryption (returns null on failure instead of throwing)
+          const decryptedVector = await safeDecrypt(row.id, blobArray);
+
+          if (decryptedVector) {
+            storedEmbeddings.push({
+              userId: row.id,
+              embeddingBlob: decryptedVector,
+              enrolledAt: new Date(row.enrolled_at).toISOString(),
+            });
+            decryptedCount++;
+          } else {
+            // Fallback: if blob is exactly 512 or 768 bytes, treat it as raw unencrypted Float32Array
+            if (blobArray.length === 512 || blobArray.length === 768) {
+              console.log(`[UserRepository] Using legacy ${blobArray.length}-byte raw fallback for user ${row.id}`);
+              storedEmbeddings.push({
+                userId: row.id,
+                embeddingBlob: blobArray,
+                enrolledAt: new Date(row.enrolled_at).toISOString(),
+              });
+              decryptedCount++;
+            } else {
+              console.error(`[UserRepository] Decryption failed for user ${row.id}, blob size ${blobArray.length}. Skipping.`);
+              skippedCount++;
+            }
+          }
+        } catch (rowError: any) {
+          console.error(`[UserRepository] Error processing embedding for user ${row.id}: ${rowError.message || rowError}`);
+          skippedCount++;
+        }
       }
+
+      console.log(`[UserRepository] Successfully decrypted ${decryptedCount} of ${totalCandidates} embeddings (${skippedCount} skipped)`);
       return storedEmbeddings;
     } catch (error) {
       console.error('[UserRepository] Failed to load embeddings for partition:', error);
@@ -221,6 +288,12 @@ class UserRepository {
 
         if (exists) {
           if (user.embedding_blob) {
+            // Convert Uint8Array to ArrayBuffer for react-native-quick-sqlite BLOB compatibility
+            const binaryBuffer = user.embedding_blob.buffer.slice(
+              user.embedding_blob.byteOffset,
+              user.embedding_blob.byteOffset + user.embedding_blob.byteLength
+            );
+
             tx.execute(
               `UPDATE users SET 
                 name_encrypted = ?, 
@@ -235,7 +308,7 @@ class UserRepository {
                 user.name_encrypted,
                 user.role_encrypted,
                 user.partition,
-                user.embedding_blob,
+                binaryBuffer,
                 user.enrolled_at,
                 user.last_seen,
                 user.sync_status,
@@ -264,6 +337,14 @@ class UserRepository {
             );
           }
         } else {
+          // Convert Uint8Array to ArrayBuffer for react-native-quick-sqlite BLOB compatibility
+          const binaryBuffer = user.embedding_blob
+            ? user.embedding_blob.buffer.slice(
+                user.embedding_blob.byteOffset,
+                user.embedding_blob.byteOffset + user.embedding_blob.byteLength
+              )
+            : null;
+
           tx.execute(
             `INSERT INTO users (
               id, name_encrypted, role_encrypted, partition, embedding_blob, enrolled_at, last_seen, sync_status
@@ -273,7 +354,7 @@ class UserRepository {
               user.name_encrypted,
               user.role_encrypted,
               user.partition,
-              user.embedding_blob || null,
+              binaryBuffer,
               user.enrolled_at,
               user.last_seen,
               user.sync_status,

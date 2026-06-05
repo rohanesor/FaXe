@@ -176,14 +176,16 @@ function aesEncryptBlock(block: Uint8Array, keyWA: CryptoJS.lib.WordArray): Uint
 // ============================================================================
 
 /**
- * Encrypts a 512-byte embedding vector using AES-256-GCM.
+ * Encrypts a 512-byte or 768-byte embedding vector using AES-256-GCM.
  * Generates a random 12-byte IV per invocation.
- * Output format: [IV (12 bytes) | Ciphertext (512 bytes) | Auth Tag (16 bytes)]
+ * Output format: [IV (12 bytes) | Ciphertext (length bytes) | Auth Tag (16 bytes)]
  */
 export async function encrypt(userId: string, embedding: Uint8Array): Promise<Uint8Array> {
-  if (embedding.length !== 512) {
-    throw new CipherError('ENCRYPTION_FAILED', `Invalid embedding size: expected 512 bytes, got ${embedding.length}`);
+  if (embedding.length !== 512 && embedding.length !== 768) {
+    throw new CipherError('ENCRYPTION_FAILED', `Invalid embedding size: expected 512 or 768 bytes, got ${embedding.length}`);
   }
+
+  const length = embedding.length;
 
   try {
     const masterKeyHex = keyManager.getMasterKeySync();
@@ -209,8 +211,8 @@ export async function encrypt(userId: string, embedding: Uint8Array): Promise<Ui
     const hashKey = aesEncryptBlock(zeroBlock, keyWA);
 
     // 4. Perform AES-CTR encryption
-    const ciphertext = new Uint8Array(512);
-    const numBlocks = 32; // 512 bytes / 16 bytes per block = 32 blocks
+    const ciphertext = new Uint8Array(length);
+    const numBlocks = length / 16;
 
     for (let b = 0; b < numBlocks; b++) {
       // Counter block CB_i = [ IV (12 bytes) | Counter (4 bytes big-endian) ]
@@ -243,11 +245,11 @@ export async function encrypt(userId: string, embedding: Uint8Array): Promise<Ui
       tag[i] = ghash[i] ^ ks0[i];
     }
 
-    // 7. Package output [IV (12B) | Ciphertext (512B) | Tag (16B)] -> 540 bytes
-    const packaged = new Uint8Array(12 + 512 + 16);
+    // 7. Package output [IV (12B) | Ciphertext (length B) | Tag (16B)]
+    const packaged = new Uint8Array(12 + length + 16);
     packaged.set(iv, 0);
     packaged.set(ciphertext, 12);
-    packaged.set(tag, 12 + 512);
+    packaged.set(tag, 12 + length);
 
     return packaged;
   } catch (error: any) {
@@ -256,12 +258,23 @@ export async function encrypt(userId: string, embedding: Uint8Array): Promise<Ui
 }
 
 /**
- * Decrypts and authenticates a 540-byte binary blob using AES-256-GCM.
+ * Decrypts and authenticates a binary blob using AES-256-GCM.
  * Validates the authentication tag. Throws AUTH_TAG_MISMATCH if tampered with.
  */
 export async function decrypt(userId: string, blob: Uint8Array): Promise<Uint8Array> {
-  if (blob.length !== 540) {
-    throw new CipherError('INVALID_BLOB', `Invalid encrypted blob length: expected 540 bytes, got ${blob.length}`);
+  // Legacy passthrough: if blob is exactly 512 or 768 bytes, it's an unencrypted raw Float32Array
+  if (blob.length === 512 || blob.length === 768) {
+    console.log(`[EmbeddingCipher] Legacy ${blob.length}-byte unencrypted embedding detected for user ${userId}, returning raw.`);
+    return blob;
+  }
+
+  if (blob.length < 28) {
+    throw new CipherError('INVALID_BLOB', `Blob too short: minimum 28 bytes (12 IV + 16 tag), got ${blob.length}`);
+  }
+
+  const length = blob.length - 28;
+  if (length !== 512 && length !== 768) {
+    throw new CipherError('INVALID_BLOB', `Invalid encrypted blob length: expected 540 or 796 bytes, got ${blob.length}`);
   }
 
   try {
@@ -271,10 +284,10 @@ export async function decrypt(userId: string, blob: Uint8Array): Promise<Uint8Ar
     const derivedKeyHex = hkdfDeriveKey(masterKeyHex, userId);
     const keyWA = CryptoJS.enc.Hex.parse(derivedKeyHex);
 
-    // 2. Unpack blob [IV (12B) | Ciphertext (512B) | Tag (16B)]
+    // 2. Unpack blob [IV (12B) | Ciphertext (length B) | Tag (16B)]
     const iv = blob.subarray(0, 12);
-    const ciphertext = blob.subarray(12, 12 + 512);
-    const tag = blob.subarray(12 + 512, 540);
+    const ciphertext = blob.subarray(12, 12 + length);
+    const tag = blob.subarray(12 + length, 12 + length + 16);
 
     // 3. Compute hash subkey H = AES_K(0^16)
     const zeroBlock = new Uint8Array(16);
@@ -303,8 +316,8 @@ export async function decrypt(userId: string, blob: Uint8Array): Promise<Uint8Ar
     }
 
     // 7. Perform AES-CTR decryption (identical XOR transform)
-    const plaintext = new Uint8Array(512);
-    const numBlocks = 32;
+    const plaintext = new Uint8Array(length);
+    const numBlocks = length / 16;
 
     for (let b = 0; b < numBlocks; b++) {
       const cb = new Uint8Array(16);
@@ -328,5 +341,19 @@ export async function decrypt(userId: string, blob: Uint8Array): Promise<Uint8Ar
       throw error;
     }
     throw new CipherError('DECRYPTION_FAILED', `Decryption pipeline failure: ${error.message || error}`);
+  }
+}
+
+/**
+ * Safe wrapper around decrypt that catches all exceptions and returns null.
+ * Use this when iterating over multiple embeddings — a single corrupt blob
+ * should not kill the entire batch.
+ */
+export async function safeDecrypt(userId: string, blob: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    return await decrypt(userId, blob);
+  } catch (error: any) {
+    console.error(`[EmbeddingCipher] safeDecrypt failed for user ${userId}: ${error.message || error}`);
+    return null;
   }
 }

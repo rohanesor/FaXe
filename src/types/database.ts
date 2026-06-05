@@ -8,7 +8,7 @@ export interface EnrollmentInput {
   name: string;
   role: string;
   partition: string;
-  embedding: Float32Array; // The raw 128-float face embedding vector
+  embedding: Float32Array; // The raw 128-float or 192-float face embedding vector
   enrolledAt: string;       // ISO timestamp
 }
 

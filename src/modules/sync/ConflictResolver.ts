@@ -124,7 +124,7 @@ class ConflictResolver {
         `Embedding Conflict [Remote wins]: Remote enrollment (${remote.enrolledAt}) is newer than Local (${local.enrolledAt}). Replacing with remote.`
       );
 
-      // Convert remote hex vector back to byte array (512 bytes)
+      // Convert remote hex vector back to byte array
       const remoteBytes = this.hexToUint8Array(remote.embeddingBlobHex);
       return {
         userId: remote.userId,

@@ -1,7 +1,7 @@
 import { AlignedFaceFrame } from '../../types/camera';
 import { StoredEmbedding, MatchResult } from '../../types/recognition';
-import { generateEmbedding } from './EmbeddingGenerator';
-import { matchEmbedding } from './EmbeddingMatcher';
+import { FaceEmbeddingService } from './FaceEmbeddingService';
+import { FaceMatcher } from './FaceMatcher';
 
 /**
  * Executes the end-to-end biometric face recognition pipeline.
@@ -16,11 +16,11 @@ export async function recognizeFace(
   const pipelineStart = Date.now();
 
   try {
-    // 1. Generate the 128-float feature vector embedding
-    const { embedding } = await generateEmbedding(faceFrame.base64jpeg);
+    // 1. Generate the 128-float feature vector embedding using the real ML pipeline
+    const embedding = await FaceEmbeddingService.generateEmbedding(faceFrame.base64jpeg);
 
-    // 2. Perform Cosine Similarity matching across candidates
-    const matchResult = matchEmbedding(embedding, candidates);
+    // 2. Perform Cosine Similarity matching across candidates using the real matching engine
+    const matchResult = FaceMatcher.match(embedding, candidates);
 
     // 3. Compute overall pipeline latency (inference + match scan)
     const overallTimeMs = Date.now() - pipelineStart;
@@ -43,8 +43,8 @@ export async function recognizeFace(
 }
 
 // Re-export core modules for simplified client usage
-export { modelLoader } from './ModelLoader';
-export { generateEmbedding } from './EmbeddingGenerator';
-export { matchEmbedding, computeCosineSimilarity } from './EmbeddingMatcher';
+export { modelManager } from './ModelManager';
+export { FaceEmbeddingService } from './FaceEmbeddingService';
+export { FaceMatcher } from './FaceMatcher';
 export { serializeEmbedding, deserializeEmbedding } from './EmbeddingSerializer';
 export { runRecognitionBenchmark } from './BenchmarkTest';

@@ -40,8 +40,16 @@ class DatabaseManager {
       this.openTimeMs = Date.now() - startTime;
       console.log(`[DatabaseManager] SQLite database opened in ${this.openTimeMs}ms`);
 
+      // Enable WAL mode for better read concurrency
+      this.db.execute('PRAGMA journal_mode=WAL;');
+      console.log('[DatabaseManager] WAL mode enabled.');
+
       // Execute migration manager
       await this.runMigrations();
+
+      // Run diagnostics to log blob health
+      this.runDiagnostic();
+
       this.initialized = true;
     } catch (error) {
       console.error('[DatabaseManager] SQLite database startup failed:', error);
@@ -120,6 +128,27 @@ class DatabaseManager {
       this.db = null;
       this.initialized = false;
       console.log('[DatabaseManager] Database connection closed.');
+    }
+  }
+
+  /**
+   * Diagnostic utility: logs the first 10 users' blob sizes and sync status.
+   * Called at startup and after enrollment to verify data integrity.
+   */
+  public runDiagnostic(): void {
+    try {
+      const db = this.getDB();
+      const result = db.execute(
+        'SELECT id, length(embedding_blob) as blob_size, sync_status FROM users LIMIT 10;'
+      );
+      const len = result.rows?.length ?? 0;
+      console.log(`[DatabaseManager][DIAGNOSTIC] Users table sample (${len} rows):`);
+      for (let i = 0; i < len; i++) {
+        const row = result.rows?.item(i);
+        console.log(`  [${i}] id=${row.id}, blob_size=${row.blob_size}, sync_status=${row.sync_status}`);
+      }
+    } catch (error) {
+      console.warn('[DatabaseManager][DIAGNOSTIC] Diagnostic query failed (table may not exist yet):', error);
     }
   }
 }

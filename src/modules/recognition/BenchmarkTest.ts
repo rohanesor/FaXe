@@ -1,16 +1,16 @@
 import { StoredEmbedding, MatchResult } from '../../types/recognition';
+import { FaceMatcher } from './FaceMatcher';
 import { serializeEmbedding } from './EmbeddingSerializer';
-import { matchEmbedding } from './EmbeddingMatcher';
 
 /**
- * Generates a random L2-normalized 128-float embedding vector.
+ * Generates a random L2-normalized 192-float embedding vector.
  * Utilizes random distribution and enforces strict L2 Euclidean normalization.
  */
 function generateRandomNormalizedVector(): Float32Array {
-  const vector = new Float32Array(128);
+  const vector = new Float32Array(192);
   let sumSquare = 0;
   
-  for (let i = 0; i < 128; i++) {
+  for (let i = 0; i < 192; i++) {
     const coordinate = Math.random() * 2 - 1; // range [-1, 1]
     vector[i] = coordinate;
     sumSquare += coordinate * coordinate;
@@ -18,7 +18,7 @@ function generateRandomNormalizedVector(): Float32Array {
   
   const norm = Math.sqrt(sumSquare);
   if (norm > 0) {
-    for (let i = 0; i < 128; i++) {
+    for (let i = 0; i < 192; i++) {
       vector[i] /= norm;
     }
   }
@@ -60,14 +60,14 @@ export function runRecognitionBenchmark(): {
   const targetBlob = candidates[targetIndex].embeddingBlob;
   
   // Reconstruct the target Float32Array with memory-alignment safety
-  const alignedBuffer = new ArrayBuffer(512);
+  const alignedBuffer = new ArrayBuffer(768);
   new Uint8Array(alignedBuffer).set(targetBlob);
   const targetVector = new Float32Array(alignedBuffer);
   
   // Perturb the target vector by adding 3% random noise to simulate real-world scan variances
-  const positiveProbe = new Float32Array(128);
+  const positiveProbe = new Float32Array(192);
   let sumSquare = 0;
-  for (let i = 0; i < 128; i++) {
+  for (let i = 0; i < 192; i++) {
     const noise = (Math.random() * 2 - 1) * 0.03;
     positiveProbe[i] = targetVector[i] + noise;
     sumSquare += positiveProbe[i] * positiveProbe[i];
@@ -75,7 +75,7 @@ export function runRecognitionBenchmark(): {
   
   // Re-normalize the positive probe vector to unit length
   const norm = Math.sqrt(sumSquare);
-  for (let i = 0; i < 128; i++) {
+  for (let i = 0; i < 192; i++) {
     positiveProbe[i] /= norm;
   }
 
@@ -85,13 +85,13 @@ export function runRecognitionBenchmark(): {
   // 4. Benchmark positive search execution latency (scans 5,000 candidates)
   console.log('[BenchmarkTest] Starting positive search scan (should match usr-bench-2500)...');
   const posStart = Date.now();
-  const positiveResult = matchEmbedding(positiveProbe, candidates);
+  const positiveResult = FaceMatcher.match(positiveProbe, candidates);
   const positiveMatchTimeMs = Date.now() - posStart;
 
   // 5. Benchmark negative search execution latency (scans 5,000 candidates)
   console.log('[BenchmarkTest] Starting negative search scan (should not match)...');
   const negStart = Date.now();
-  const negativeResult = matchEmbedding(negativeProbe, candidates);
+  const negativeResult = FaceMatcher.match(negativeProbe, candidates);
   const negativeMatchTimeMs = Date.now() - negStart;
 
   // 6. Calculate throughput

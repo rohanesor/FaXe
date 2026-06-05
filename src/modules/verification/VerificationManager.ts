@@ -1,13 +1,15 @@
 import { AlignedFaceFrame } from '../../types/camera';
 import { LivenessResult } from '../../types/liveness';
 import { VerificationOutcome, VerificationResult } from '../../types/verification';
+import { enrollmentRepository } from '../database/EnrollmentRepository';
 import { userRepository, authLogRepository, wipeStoredEmbeddings } from '../database';
-import { recognizeFace } from '../recognition';
+import { FaceEmbeddingService } from '../recognition/FaceEmbeddingService';
+import { FaceMatcher } from '../recognition/FaceMatcher';
 import { Logger } from '../../utils/logger';
 
 /**
- * Orchestrator managing the offline face verification pipeline.
- * Connects liveness results, face embedding comparison, audit logging, and RAM sanitation.
+ * Phase 7 - Verification Flow.
+ * Orchestrates the end-to-end real biometric verification flow.
  */
 class VerificationManager {
   private static instance: VerificationManager;
@@ -22,8 +24,8 @@ class VerificationManager {
   }
 
   /**
-   * Evaluates a biometric scan against partition enrollment templates.
-   * Logs outcomes, handles decryption cleanup, and measures pipeline latency.
+   * Processes a live frame, runs liveness, generates embedding, matches against enrolled templates,
+   * logs the results to SQLite, and returns the verification outcome.
    */
   public async verifyUser(
     faceFrame: AlignedFaceFrame,
@@ -33,11 +35,10 @@ class VerificationManager {
     const startTime = Date.now();
 
     try {
-      // Step 1: Check Liveness validation
+      // 1. Liveness check verification
       if (!livenessResult.passed) {
         Logger.warn('VerificationManager', 'Liveness check failed.');
         
-        // Log spoof attempt in DB
         await authLogRepository.logAuthAttempt({
           userId: 'spoof_attempt',
           result: 'spoof',
@@ -46,7 +47,6 @@ class VerificationManager {
           outcome: VerificationOutcome.SPOOF_DETECTED,
         });
 
-        const duration = Date.now() - startTime;
         return {
           outcome: VerificationOutcome.SPOOF_DETECTED,
           userId: null,
@@ -54,17 +54,16 @@ class VerificationManager {
           role: null,
           confidence: 0.0,
           livenessScore: livenessResult.score,
-          pipelineTimeMs: duration,
-          message: 'Liveness checking intercepted a spoof bypass attempt.',
+          pipelineTimeMs: Date.now() - startTime,
+          message: 'Liveness check failed. Spoof suspected.',
         };
       }
 
-      // Step 2: Fetch stored user embeddings for partition
-      const candidates = await userRepository.getEmbeddingsForPartition(partition);
+      // 2. Load enrolled templates for active partition
+      const candidates = await enrollmentRepository.getCandidates(partition);
       if (candidates.length === 0) {
-        Logger.warn('VerificationManager', `No enrolled operators in partition: ${partition}`);
+        Logger.warn('VerificationManager', `No enrolled profiles in partition: ${partition}`);
 
-        // Log search attempt failure due to zero population
         await authLogRepository.logAuthAttempt({
           userId: 'unknown',
           result: 'failure',
@@ -73,7 +72,6 @@ class VerificationManager {
           outcome: VerificationOutcome.NO_USERS_ENROLLED,
         });
 
-        const duration = Date.now() - startTime;
         return {
           outcome: VerificationOutcome.NO_USERS_ENROLLED,
           userId: null,
@@ -81,22 +79,27 @@ class VerificationManager {
           role: null,
           confidence: null,
           livenessScore: livenessResult.score,
-          pipelineTimeMs: duration,
-          message: 'No users have been enrolled in this local partition.',
+          pipelineTimeMs: Date.now() - startTime,
+          message: 'No users have been enrolled in this partition.',
         };
       }
 
-      // Step 3: Call match recognition algorithm
-      const matchResult = await recognizeFace(faceFrame, candidates);
+      // 3. Generate live embedding via TFLite Model
+      console.log('[VerificationManager] Generating live embedding...');
+      const liveEmbedding = await FaceEmbeddingService.generateEmbedding(faceFrame.base64jpeg);
 
-      // Step 4: If not recognized
+      // 4. Match using Cosine Similarity matching engine
+      console.log('[VerificationManager] Matching embedding against enrolled candidates...');
+      const matchResult = FaceMatcher.match(liveEmbedding, candidates);
+
+      // Wipe decrypted template embeddings from RAM immediately for security
+      wipeStoredEmbeddings(candidates);
+
+      const duration = Date.now() - startTime;
+
       if (!matchResult.matched) {
-        Logger.warn('VerificationManager', 'Biometric match failed.');
+        Logger.warn('VerificationManager', `Biometric match failed. Confidence: ${matchResult.confidence}`);
 
-        // Wipe decrypted vector arrays from memory immediately
-        wipeStoredEmbeddings(candidates);
-
-        // Log failed attempt
         await authLogRepository.logAuthAttempt({
           userId: 'unknown',
           result: 'failure',
@@ -105,7 +108,6 @@ class VerificationManager {
           outcome: VerificationOutcome.NOT_RECOGNIZED,
         });
 
-        const duration = Date.now() - startTime;
         return {
           outcome: VerificationOutcome.NOT_RECOGNIZED,
           userId: null,
@@ -114,27 +116,23 @@ class VerificationManager {
           confidence: matchResult.confidence,
           livenessScore: livenessResult.score,
           pipelineTimeMs: duration,
-          message: 'Identity verification failed. Facial template does not match.',
+          message: 'Biometric verification failed. Face does not match registered profiles.',
         };
       }
 
-      // Step 5: If recognized successfully
-      Logger.info('VerificationManager', `Match verified for user ID: ${matchResult.userId}`);
-      
+      // 5. Success: Find matched user metadata in SQLite
+      Logger.info('VerificationManager', `Biometric match verified for user: ${matchResult.userId}`);
       const allUsers = await userRepository.getUsersByPartition(partition);
       const matchedUser = allUsers.find((u) => u.id === matchResult.userId);
-
-      // Wipe decrypted vectors from memory immediately
-      wipeStoredEmbeddings(candidates);
 
       if (!matchedUser) {
         throw new Error(`Matched user ID ${matchResult.userId} metadata not found in SQLite.`);
       }
 
-      // Update user's last seen timestamp
+      // Update last seen
       await userRepository.updateLastSeen(matchedUser.id);
 
-      // Log successful verification attempt
+      // Log successful verification
       await authLogRepository.logAuthAttempt({
         userId: matchedUser.id,
         result: 'success',
@@ -143,8 +141,7 @@ class VerificationManager {
         outcome: VerificationOutcome.VERIFIED,
       });
 
-      const duration = Date.now() - startTime;
-      Logger.info('VerificationManager', `Total verification process time: ${duration}ms`);
+      console.log(`[VerificationManager] Verification succeeded in ${duration}ms (confidence: ${matchResult.confidence})`);
 
       return {
         outcome: VerificationOutcome.VERIFIED,
@@ -156,10 +153,9 @@ class VerificationManager {
         pipelineTimeMs: duration,
         message: null,
       };
+
     } catch (error: any) {
-      Logger.error('VerificationManager', 'Unexpected verification exception', error);
-      const duration = Date.now() - startTime;
-      
+      Logger.error('VerificationManager', 'Unexpected verification pipeline exception', error);
       return {
         outcome: VerificationOutcome.ERROR,
         userId: null,
@@ -167,8 +163,8 @@ class VerificationManager {
         role: null,
         confidence: null,
         livenessScore: livenessResult.score || 0.0,
-        pipelineTimeMs: duration,
-        message: error.message || 'An unexpected biometric verification pipeline error occurred.',
+        pipelineTimeMs: Date.now() - startTime,
+        message: error.message || 'An unexpected biometric pipeline error occurred.',
       };
     }
   }

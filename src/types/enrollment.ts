@@ -6,6 +6,7 @@ export interface EnrollmentFormInput {
   name: string;
   role: 'worker' | 'admin' | 'visitor';
   partition: string;
+  employeeId?: string;
 }
 
 export interface EnrollmentResult {
