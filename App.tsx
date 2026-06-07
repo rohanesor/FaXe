@@ -12,6 +12,7 @@ import { Logger } from './src/utils/logger';
 
 function App() {
   const [isInitializing, setIsInitializing] = useState(true);
+  const [showSplashOverlay, setShowSplashOverlay] = useState(true);
   const [loadingStatus, setLoadingStatus] = useState('Initializing secure database...');
   const [displayedStatus, setDisplayedStatus] = useState('Initializing secure database...');
   const [initError, setInitError] = useState<string | null>(null);
@@ -25,6 +26,7 @@ function App() {
   const pulseOpacity2 = useRef(new Animated.Value(0)).current;
   const laserTranslateY = useRef(new Animated.Value(0)).current;
   const statusOpacity = useRef(new Animated.Value(1)).current;
+  const splashOpacity = useRef(new Animated.Value(1)).current;
 
   // 1. Initial logo spring & fade animation
   useEffect(() => {
@@ -158,53 +160,66 @@ function App() {
     };
   }, []);
 
-  if (isInitializing) {
-    return (
-      <SafeAreaProvider>
-        <ErrorBoundary>
-          <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
-          <View style={styles.splashContainer}>
-            <Animated.View style={[styles.brandingBox, { transform: [{ scale: logoScale }], opacity: logoOpacity }]}>
-              <Text style={styles.logoText}>DATALAKE</Text>
-              <Text style={styles.logoSubtext}>SECURE FACE AUTH</Text>
-            </Animated.View>
-
-            {/* Premium Face ID style Scanner Graphic */}
-            <View style={styles.scannerContainer}>
-              <Animated.View style={[styles.pulseRing, { transform: [{ scale: pulseScale1 }], opacity: pulseOpacity1 }]} />
-              <Animated.View style={[styles.pulseRing, { transform: [{ scale: pulseScale2 }], opacity: pulseOpacity2 }]} />
-              <View style={styles.reticleBox}>
-                <View style={[styles.bracket, styles.bracketTopLeft]} />
-                <View style={[styles.bracket, styles.bracketTopRight]} />
-                <View style={[styles.bracket, styles.bracketBottomLeft]} />
-                <View style={[styles.bracket, styles.bracketBottomRight]} />
-                <Animated.View style={[styles.laserLine, { transform: [{ translateY: laserTranslateY }] }]} />
-              </View>
-            </View>
-            
-            <Animated.Text style={[styles.loadingText, { opacity: statusOpacity }]}>
-              {displayedStatus}
-            </Animated.Text>
-            
-            {initError && (
-              <Text style={styles.errorText}>Error: {initError}</Text>
-            )}
-            
-            <Text style={styles.versionText}>v1.12.0 • OFFLINE ACTIVE MODE</Text>
-          </View>
-          <ToastContainer ref={(ref) => setGlobalToastRef(ref)} />
-        </ErrorBoundary>
-      </SafeAreaProvider>
-    );
-  }
+  // 5. Fade out splash screen when initialization finishes
+  useEffect(() => {
+    if (!isInitializing) {
+      Animated.timing(splashOpacity, {
+        toValue: 0,
+        duration: 800,
+        useNativeDriver: true,
+      }).start(() => {
+        setShowSplashOverlay(false);
+      });
+    }
+  }, [isInitializing, splashOpacity]);
 
   return (
     <SafeAreaProvider>
       <ErrorBoundary>
-        <NavigationContainer>
-          <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
-          <AppNavigator />
-        </NavigationContainer>
+        <View style={styles.rootContainer}>
+          <NavigationContainer>
+            <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
+            <AppNavigator />
+          </NavigationContainer>
+
+          {showSplashOverlay && (
+            <Animated.View 
+              style={[styles.splashOverlayContainer, { opacity: splashOpacity }]}
+              pointerEvents={isInitializing ? 'auto' : 'none'}
+            >
+              <StatusBar barStyle="light-content" backgroundColor="#0A0A0A" />
+              <View style={styles.splashContainer}>
+                <Animated.View style={[styles.brandingBox, { transform: [{ scale: logoScale }], opacity: logoOpacity }]}>
+                  <Text style={styles.logoText}>DATALAKE</Text>
+                  <Text style={styles.logoSubtext}>SECURE FACE AUTH</Text>
+                </Animated.View>
+
+                {/* Premium Face ID style Scanner Graphic */}
+                <View style={styles.scannerContainer}>
+                  <Animated.View style={[styles.pulseRing, { transform: [{ scale: pulseScale1 }], opacity: pulseOpacity1 }]} />
+                  <Animated.View style={[styles.pulseRing, { transform: [{ scale: pulseScale2 }], opacity: pulseOpacity2 }]} />
+                  <View style={styles.reticleBox}>
+                    <View style={[styles.bracket, styles.bracketTopLeft]} />
+                    <View style={[styles.bracket, styles.bracketTopRight]} />
+                    <View style={[styles.bracket, styles.bracketBottomLeft]} />
+                    <View style={[styles.bracket, styles.bracketBottomRight]} />
+                    <Animated.View style={[styles.laserLine, { transform: [{ translateY: laserTranslateY }] }]} />
+                  </View>
+                </View>
+                
+                <Animated.Text style={[styles.loadingText, { opacity: statusOpacity }]}>
+                  {displayedStatus}
+                </Animated.Text>
+                
+                {initError && (
+                  <Text style={styles.errorText}>Error: {initError}</Text>
+                )}
+                
+                <Text style={styles.versionText}>v1.12.0 • OFFLINE ACTIVE MODE</Text>
+              </View>
+            </Animated.View>
+          )}
+        </View>
         <ToastContainer ref={(ref) => setGlobalToastRef(ref)} />
       </ErrorBoundary>
     </SafeAreaProvider>
@@ -212,6 +227,18 @@ function App() {
 }
 
 const styles = StyleSheet.create({
+  rootContainer: {
+    flex: 1,
+    backgroundColor: '#0A0A0A',
+  },
+  splashOverlayContainer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 9999,
+  },
   splashContainer: {
     flex: 1,
     backgroundColor: '#0A0A0A',
